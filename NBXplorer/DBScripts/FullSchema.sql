@@ -188,22 +188,21 @@ BEGIN
 	BEGIN
 	  TRUNCATE TABLE matched_outs, matched_ins, matched_conflicts, new_ins;
 	EXCEPTION WHEN others THEN
-	  CREATE TEMPORARY TABLE IF NOT EXISTS matched_outs (LIKE new_out);
-	  ALTER TABLE matched_outs ADD COLUMN IF NOT EXISTS "order" BIGINT;
-	  CREATE TEMPORARY TABLE IF NOT EXISTS new_ins (LIKE new_in);
-	  ALTER TABLE new_ins ADD COLUMN IF NOT EXISTS "order" BIGINT;
-	  ALTER TABLE new_ins ADD COLUMN IF NOT EXISTS code TEXT;
-	  CREATE TEMPORARY TABLE IF NOT EXISTS matched_ins (LIKE new_ins);
-	  ALTER TABLE matched_ins ADD COLUMN IF NOT EXISTS script TEXT;
-	  ALTER TABLE matched_ins ADD COLUMN IF NOT EXISTS value bigint;
-	  ALTER TABLE matched_ins ADD COLUMN IF NOT EXISTS asset_id TEXT;
-	  CREATE TEMPORARY TABLE IF NOT EXISTS matched_conflicts (
+	  CREATE TEMPORARY TABLE matched_outs (LIKE new_out);
+	  ALTER TABLE matched_outs ADD COLUMN "order" BIGINT;
+	  CREATE TEMPORARY TABLE new_ins (LIKE new_in);
+	  ALTER TABLE new_ins ADD COLUMN "order" BIGINT;
+	  ALTER TABLE new_ins ADD COLUMN code TEXT;
+	  CREATE TEMPORARY TABLE matched_ins (LIKE new_ins);
+	  ALTER TABLE matched_ins ADD COLUMN script TEXT;
+	  ALTER TABLE matched_ins ADD COLUMN value bigint;
+	  ALTER TABLE matched_ins ADD COLUMN asset_id TEXT;
+	  CREATE TEMPORARY TABLE matched_conflicts (
 		code TEXT,
 		spent_tx_id TEXT,
 		spent_idx BIGINT,
 		replacing_tx_id TEXT,
-		replaced_tx_id TEXT,
-		is_new BOOLEAN);
+		replaced_tx_id TEXT);
 	END;
 	has_match := 'f';
 	INSERT INTO matched_outs
@@ -231,8 +230,7 @@ BEGIN
 	  JOIN matched_outs o ON i.spent_tx_id = o.tx_id AND i.spent_idx = o.idx) i
 	ORDER BY "order";
 	DELETE FROM new_ins
-	WHERE NOT tx_id=ANY(SELECT tx_id FROM matched_ins UNION SELECT tx_id FROM matched_outs)
-	AND NOT (spent_tx_id || spent_idx::TEXT)=ANY(SELECT (tx_id || idx::TEXT) FROM spent_outs);
+	WHERE NOT tx_id=ANY(SELECT tx_id FROM matched_ins) AND NOT tx_id=ANY(SELECT tx_id FROM matched_outs);
 	INSERT INTO matched_conflicts
 	WITH RECURSIVE cte(code, spent_tx_id, spent_idx, replacing_tx_id, replaced_tx_id) AS
 	(
@@ -1360,13 +1358,6 @@ INSERT INTO nbxv1_migrations VALUES ('012.PerfFixGetWalletsRecent');
 INSERT INTO nbxv1_migrations VALUES ('013.FixTrackedTransactions');
 INSERT INTO nbxv1_migrations VALUES ('014.FixAddressReuse');
 INSERT INTO nbxv1_migrations VALUES ('015.AvoidWAL');
-INSERT INTO nbxv1_migrations VALUES ('016.FixTempTableCreation');
-INSERT INTO nbxv1_migrations VALUES ('017.FixDoubleSpendDetection');
-INSERT INTO nbxv1_migrations VALUES ('018.FastWalletRecent');
-INSERT INTO nbxv1_migrations VALUES ('019.FixDoubleSpendDetection2');
-INSERT INTO nbxv1_migrations VALUES ('020.ReplacingShouldBeIdempotent');
-INSERT INTO nbxv1_migrations VALUES ('021.KeyPathInfoReturnsWalletId');
-INSERT INTO nbxv1_migrations VALUES ('022.WalletsWalletsParentIdIndex');
 
 ALTER TABLE ONLY nbxv1_migrations
     ADD CONSTRAINT nbxv1_migrations_pkey PRIMARY KEY (script_name);
