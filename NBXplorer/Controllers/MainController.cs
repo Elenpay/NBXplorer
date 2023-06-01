@@ -822,5 +822,229 @@ namespace NBXplorer.Controllers
 				_ => RPCErrorCode.RPC_TRANSACTION_ERROR
 			};
 		}
+
+		[HttpPost]
+		[Route("cryptos/{cryptoCode}/derivations")]
+		public async Task<IActionResult> GenerateWallet(string cryptoCode, [FromBody] GenerateWalletRequest request)
+		{
+			if (request == null)
+				request = new GenerateWalletRequest();
+			var network = GetNetwork(cryptoCode, request.ImportKeysToRPC);
+			if (network.CoinType == null)
+				// Don't document, only shitcoins nobody use goes into this
+				throw new NBXplorerException(new NBXplorerError(400, "not-supported", "This feature is not supported for this coin because we don't have CoinType information"));
+			request.WordList ??= Wordlist.English;
+			request.WordCount ??= WordCount.Twelve;
+			request.ScriptPubKeyType ??= ScriptPubKeyType.Segwit;
+			if (request.ScriptPubKeyType is null)
+			{
+				request.ScriptPubKeyType = network.NBitcoinNetwork.Consensus.SupportSegwit ? ScriptPubKeyType.Segwit : ScriptPubKeyType.Legacy;
+			}
+			if (!network.NBitcoinNetwork.Consensus.SupportSegwit && request.ScriptPubKeyType != ScriptPubKeyType.Legacy)
+				throw new NBXplorerException(new NBXplorerError(400, "segwit-not-supported", "Segwit is not supported, please explicitely set scriptPubKeyType to Legacy"));
+
+			var repo = RepositoryProvider.GetRepository(network);
+			Mnemonic mnemonic = null;
+			if (request.ExistingMnemonic != null)
+			{
+				try
+				{
+					mnemonic = new Mnemonic(request.ExistingMnemonic, request.WordList);
+				}
+				catch
+				{
+					throw new NBXplorerException(new NBXplorerError(400, "invalid-mnemonic", "Invalid mnemonic words"));
+				}
+			}
+			else
+			{
+				mnemonic = new Mnemonic(request.WordList, request.WordCount.Value);
+			}
+			var masterKey = mnemonic.DeriveExtKey(request.Passphrase).GetWif(network.NBitcoinNetwork);
+			var keyPath = GetDerivationKeyPath(request.ScriptPubKeyType.Value, request.AccountNumber, network);
+			var accountKey = masterKey.Derive(keyPath);
+			DerivationStrategyBase derivation = network.DerivationStrategyFactory.CreateDirectDerivationStrategy(accountKey.Neuter(), new DerivationStrategyOptions()
+			{
+				ScriptPubKeyType = request.ScriptPubKeyType.Value,
+				AdditionalOptions = request.AdditionalOptions is not null ? new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(request.AdditionalOptions) : null
+			});
+
+			await RepositoryProvider.GetRepository(network).EnsureWalletCreated(derivation);
+			var derivationTrackedSource = new DerivationSchemeTrackedSource(derivation);
+			List<Task> saveMetadata = new List<Task>();
+			if (request.SavePrivateKeys)
+			{
+				saveMetadata.AddRange(
+				new[] {
+					repo.SaveMetadata(derivationTrackedSource, WellknownMetadataKeys.Mnemonic, mnemonic.ToString()),
+					repo.SaveMetadata(derivationTrackedSource, WellknownMetadataKeys.MasterHDKey, masterKey),
+					repo.SaveMetadata(derivationTrackedSource, WellknownMetadataKeys.AccountHDKey, accountKey),
+					repo.SaveMetadata(derivationTrackedSource, WellknownMetadataKeys.Birthdate, DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture))
+				});
+			}
+			var accountKeyPath = new RootedKeyPath(masterKey.GetPublicKey().GetHDFingerPrint(), keyPath);
+			saveMetadata.Add(repo.SaveMetadata(derivationTrackedSource, WellknownMetadataKeys.AccountKeyPath, accountKeyPath));
+			var importAddressToRPC = await GetImportAddressToRPC(request, network);
+			saveMetadata.Add(repo.SaveMetadata<string>(derivationTrackedSource, WellknownMetadataKeys.ImportAddressToRPC, (importAddressToRPC?.ToString() ?? "False")));
+			var descriptor = GetDescriptor(accountKeyPath, accountKey.Neuter(), request.ScriptPubKeyType.Value);
+			saveMetadata.Add(repo.SaveMetadata<string>(derivationTrackedSource, WellknownMetadataKeys.AccountDescriptor, descriptor));
+			await Task.WhenAll(saveMetadata.ToArray());
+
+			await TrackWallet(cryptoCode, derivation, null);
+			return Json(new GenerateWalletResponse()
+			{
+				MasterHDKey = masterKey,
+				AccountHDKey = accountKey,
+				AccountKeyPath = accountKeyPath,
+				AccountDescriptor = descriptor,
+				DerivationScheme = derivation,
+				Mnemonic = mnemonic.ToString(),
+				Passphrase = request.Passphrase ?? string.Empty,
+				WordCount = request.WordCount.Value,
+				WordList = request.WordList
+			}, network.Serializer.Settings);
+		}
+
+		private async Task<ImportRPCMode> GetImportAddressToRPC(GenerateWalletRequest request, NBXplorerNetwork network)
+		{
+			ImportRPCMode importAddressToRPC = null;
+			if (request.ImportKeysToRPC is true)
+			{
+				var rpc = this.GetAvailableRPC(network);
+				try
+				{
+					var walletInfo = await rpc.SendCommandAsync("getwalletinfo");
+					if (walletInfo.Result["descriptors"]?.Value<bool>() is true)
+					{
+						var readOnly = walletInfo.Result["private_keys_enabled"]?.Value<bool>() is false;
+						importAddressToRPC = readOnly ? ImportRPCMode.DescriptorsReadOnly : ImportRPCMode.Descriptors;
+						if (!readOnly && request.SavePrivateKeys is false)
+							throw new NBXplorerError(400, "wallet-unavailable", $"Your RPC wallet must include private keys, but savePrivateKeys is false").AsException();
+					}
+					else
+					{
+						importAddressToRPC = ImportRPCMode.Legacy;
+					}
+				}
+				catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
+				{
+				}
+				catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_WALLET_NOT_FOUND)
+				{
+					throw new NBXplorerError(400, "wallet-unavailable", $"No wallet is loaded. Load a wallet using loadwallet or create a new one with createwallet. (Note: A default wallet is no longer automatically created)").AsException();
+				}
+			}
+
+			return importAddressToRPC;
+		}
+
+		private string GetDescriptor(RootedKeyPath accountKeyPath, BitcoinExtPubKey accountKey, ScriptPubKeyType scriptPubKeyType)
+		{
+			var imported = $"[{accountKeyPath}]{accountKey}";
+			var descriptor = scriptPubKeyType switch
+			{
+				ScriptPubKeyType.Legacy => $"pkh({imported})",
+				ScriptPubKeyType.Segwit => $"wpkh({imported})",
+				ScriptPubKeyType.SegwitP2SH => $"sh(wpkh({imported}))",
+				ScriptPubKeyType.TaprootBIP86 => $"tr({imported})",
+				_ => throw new NotSupportedException($"Bug of NBXplorer (ERR 3082), please notify the developers ({scriptPubKeyType})")
+			};
+			return OutputDescriptor.AddChecksum(descriptor);
+		}
+
+		private KeyPath GetDerivationKeyPath(ScriptPubKeyType scriptPubKeyType, int accountNumber, NBXplorerNetwork network)
+		{
+			var path = "";
+			switch (scriptPubKeyType)
+			{
+				case ScriptPubKeyType.Legacy:
+					path = "44'";
+					break;
+				case ScriptPubKeyType.Segwit:
+					path = "84'";
+					break;
+				case ScriptPubKeyType.SegwitP2SH:
+					path = "49'";
+					break;
+				case ScriptPubKeyType.TaprootBIP86:
+					path = "86'";
+					break;
+				default:
+					throw new NotSupportedException(scriptPubKeyType.ToString()); // Should never happen
+			}
+			var keyPath = new KeyPath(path);
+			return keyPath.Derive(network.CoinType)
+				   .Derive(accountNumber, true);
+		}
+
+		[HttpPost]
+		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/prune")]
+		public async Task<PruneResponse> Prune(
+			string cryptoCode,
+			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
+			DerivationStrategyBase derivationScheme, [FromBody] PruneRequest request)
+		{
+			request ??= new PruneRequest();
+			request.DaysToKeep ??= 1.0;
+			var trackedSource = new DerivationSchemeTrackedSource(derivationScheme);
+			var network = GetNetwork(cryptoCode, false);
+			var repo = RepositoryProvider.GetRepository(network);
+			var transactions = await GetAnnotatedTransactions(repo, trackedSource, false);
+			var state = transactions.ConfirmedState;
+			var prunableIds = new HashSet<uint256>();
+
+			var keepConfMax = network.NBitcoinNetwork.Consensus.GetExpectedBlocksFor(TimeSpan.FromDays(request.DaysToKeep.Value));
+			var tip = (await repo.GetTip()).Height;
+			// Step 1. We can prune if all UTXOs are spent
+			foreach (var tx in transactions.ConfirmedTransactions)
+			{
+				if (tx.Height is long h && tip - h + 1 > keepConfMax)
+				{
+					if (tx.Record.ReceivedCoins.All(c => state.SpentUTXOs.Contains(c.Outpoint)))
+					{
+						prunableIds.Add(tx.Record.Key.TxId);
+					}
+				}
+			}
+
+			// Step2. However, we need to remove those who are spending a UTXO from a transaction that is not pruned
+			retry:
+			bool removedPrunables = false;
+			if (prunableIds.Count != 0)
+			{
+				foreach (var tx in transactions.ConfirmedTransactions)
+				{
+					if (prunableIds.Count == 0)
+						break;
+					if (!prunableIds.Contains(tx.Record.TransactionHash))
+						continue;
+					foreach (var parent in tx.Record.SpentOutpoints
+													.Select(spent => transactions.GetByTxId(spent.Hash))
+													.Where(parent => parent != null)
+													.Where(parent => !prunableIds.Contains(parent.Record.TransactionHash)))
+					{
+						prunableIds.Remove(tx.Record.TransactionHash);
+						removedPrunables = true;
+					}
+				}
+			}
+			// If we removed some prunable, it may have made other transactions unprunable.
+			if (removedPrunables)
+				goto retry;
+
+			if (prunableIds.Count != 0)
+			{
+				await repo.Prune(trackedSource, prunableIds
+												.Select(id => transactions.GetByTxId(id).Record)
+												.ToList());
+				Logs.Explorer.LogInformation($"{network.CryptoCode}: Pruned {prunableIds.Count} transactions");
+			}
+			return new PruneResponse() { TotalPruned = prunableIds.Count };
+		}
+
+		public Task<IActionResult> GetUTXOs(string cryptoCode, DerivationStrategyBase derivationStrategy)
+		{
+			return this.GetUTXOs(cryptoCode, derivationStrategy, null);
+		}
 	}
 }
