@@ -41,6 +41,7 @@ namespace NBXplorer.Controllers
 			[FromQuery(Name = "amount")] long amount,
 			[FromQuery(Name = "limit")] int limit = 50,
 			[FromQuery(Name = "tolerance")] int tolerance = 0,
+			[FromQuery(Name = "closestTo")] double? closestTo = null,
 			[FromQuery(Name = "strategy")] CoinSelectionStrategy strategy = CoinSelectionStrategy.SmallestFirst)
 		{
 			var trackedSource = GetTrackedSource(derivationScheme, address);
@@ -83,7 +84,7 @@ namespace NBXplorer.Controllers
 				DateTime tx_seen_at)>(
 				$"SELECT blk_height, tx_id, wu.idx, value, script, {addrColumns}, {descriptorColumns}, mempool, input_mempool, seen_at " +
 				$"FROM wallets_utxos wu{descriptorJoin} WHERE code=@code AND wallet_id=@walletId AND immature IS FALSE AND value > 546" +
-				$"ORDER BY {CoinSelectionHelpers.OrderBy(strategy, Math.Truncate((double)(amount / limit)))}", new { code = network.CryptoCode, walletId = repo.GetWalletKey(trackedSource).wid }));
+				$"ORDER BY {CoinSelectionHelpers.OrderBy(strategy, closestTo ?? Math.Truncate((double)(amount / limit)))}", new { code = network.CryptoCode, walletId = repo.GetWalletKey(trackedSource).wid }));
 			UTXOChanges changes = new UTXOChanges()
 			{
 				CurrentHeight = (int)height,
