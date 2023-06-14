@@ -4,5 +4,5 @@ public enum CoinSelectionStrategy
 {
 	SmallestFirst,
 	BiggestFirst,
-	ClosestToAverageFirst
+	ClosestToFirst
 }

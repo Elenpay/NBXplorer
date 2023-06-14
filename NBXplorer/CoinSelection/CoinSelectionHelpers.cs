@@ -41,7 +41,7 @@ public static class CoinSelectionHelpers
 		{
 			case CoinSelectionStrategy.BiggestFirst:
 				return "value DESC";
-			case CoinSelectionStrategy.ClosestToAverageFirst:
+			case CoinSelectionStrategy.ClosestToFirst:
 				return $"abs(value - {number})";
 			case CoinSelectionStrategy.SmallestFirst:
 			default:
