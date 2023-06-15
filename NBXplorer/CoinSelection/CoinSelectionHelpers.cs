@@ -41,7 +41,7 @@ public static class CoinSelectionHelpers
 		{
 			case CoinSelectionStrategy.BiggestFirst:
 				return "value DESC";
-			case CoinSelectionStrategy.ClosestToFirst:
+			case CoinSelectionStrategy.ClosestToTargetFirst:
 				return $"abs(value - {number})";
 			case CoinSelectionStrategy.SmallestFirst:
 			default:
@@ -49,8 +49,22 @@ public static class CoinSelectionHelpers
 		}
 	}
 
+	public static double GetClosestTo(double? closestTo, long amount, int limit)
+	{
+		if (closestTo == null && limit == 0)
+		{
+			return 0;
+		}
+		return closestTo ?? Math.Truncate((double)(amount / limit));
+	}
+
 	public static List<UTXO> SelectCoins(List<UTXO> UTXOs, int limit, long amount, int tol = 0)
 	{
+		if (limit == 0)
+		{
+			return UTXOs;
+		}
+
 		var utxosQueued = new Queue<UTXO>(UTXOs);
 		var targetAmount = new Money(amount);
 		var tolerance = new Tolerance();
