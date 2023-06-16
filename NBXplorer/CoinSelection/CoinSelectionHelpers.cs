@@ -73,7 +73,7 @@ public static class CoinSelectionHelpers
 		{
 			var utxo = utxosQueued.Dequeue();
 			var utxoValue = (Money)utxo.Value;
-			if (currentAmount < targetAmount)
+			if (!tolerance.enabled && currentAmount < targetAmount || tolerance.enabled && !tolerance.Equals(currentAmount))
 			{
 				if (count >= limit && currentAmount < targetAmount)
 				{

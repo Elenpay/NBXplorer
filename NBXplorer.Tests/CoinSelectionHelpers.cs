@@ -48,7 +48,7 @@ public class CoinSelectionHelpersTests
 	}
 
 	[Fact]
-	public void SelectCoins_ShouldReturnSelectedCoins_Changeless_OneUtxoCoversAll()
+	public void SelectCoins_ShouldReturnSelectedCoins_Changeless_InsideToleranceBelow_OneUtxoCoversAll()
 	{
 		// Arrange
 		var utxos = new List<UTXO>()
@@ -57,6 +57,26 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		int tolerance = 10;
+
+		// Act
+		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
+
+		// Assert
+		Assert.Equal(new[] { new Money(8) }, GetValues(result));
+	}
+
+
+	[Fact]
+	public void SelectCoins_ShouldReturnSelectedCoins_Changeless_InsideToleranceAbove_OneUtxoCoversAll()
+	{
+		// Arrange
+		var utxos = new List<UTXO>()
+		{
+			new UTXO { Value = new Money(8) },
+		};
+		int limit = 3;
+		long amount = 7;
 		int tolerance = 10;
 
 		// Act
@@ -502,10 +522,10 @@ public class CoinSelectionHelpersTests
 		// Arrange
 		var utxos = new List<UTXO>()
 		{
-			new UTXO { Value = new Money(3) },
-			new UTXO { Value = new Money(2) },
 			new UTXO { Value = new Money(4) },
-			new UTXO { Value = new Money(1) },
+			new UTXO { Value = new Money(3) },
+			new UTXO { Value = new Money(5) },
+			new UTXO { Value = new Money(7) },
 			new UTXO { Value = new Money(6) }
 		};
 		int limit = 3;
@@ -516,7 +536,7 @@ public class CoinSelectionHelpersTests
 		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
 
 		// Assert
-		Assert.Equal(new[] { new Money(3), new Money(6), new Money(1) }, GetValues(result));
+		Assert.Equal(new[] { new Money(4), new Money(3), new Money(5) }, GetValues(result));
 	}
 
 	[Fact]
@@ -529,7 +549,7 @@ public class CoinSelectionHelpersTests
 			new UTXO { Value = new Money(4) },
 			new UTXO { Value = new Money(7) },
 			new UTXO { Value = new Money(3) },
-			new UTXO { Value = new Money(10) },
+			new UTXO { Value = new Money(12) },
 		};
 		int limit = 3;
 		long amount = 20;
@@ -539,7 +559,7 @@ public class CoinSelectionHelpersTests
 		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
 
 		// Assert
-		Assert.Equal(new[] { new Money(6), new Money(10), new Money(3) }, GetValues(result));
+		Assert.Equal(new[] { new Money(6), new Money(12), new Money(3) }, GetValues(result));
 	}
 
 	[Fact]
@@ -549,12 +569,12 @@ public class CoinSelectionHelpersTests
 		var utxos = new List<UTXO>()
 		{
 			new UTXO { Value = new Money(6) },
-			new UTXO { Value = new Money(5) },
-			new UTXO { Value = new Money(7) },
-			new UTXO { Value = new Money(4) },
-			new UTXO { Value = new Money(8) },
 			new UTXO { Value = new Money(3) },
-			new UTXO { Value = new Money(9) }
+			new UTXO { Value = new Money(3) },
+			new UTXO { Value = new Money(4) },
+			new UTXO { Value = new Money(12) },
+			new UTXO { Value = new Money(15) },
+			new UTXO { Value = new Money(16) }
 		};
 		int limit = 3;
 		long amount = 21;
@@ -564,7 +584,7 @@ public class CoinSelectionHelpersTests
 		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
 
 		// Assert
-		Assert.Equal(new[] { new Money(3), new Money(8), new Money(9) }, GetValues(result));
+		Assert.Equal(new[] { new Money(6), new Money(12), new Money(4) }, GetValues(result));
 	}
 
 	[Fact]
@@ -587,7 +607,7 @@ public class CoinSelectionHelpersTests
 		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
 
 		// Assert
-		Assert.Equal(new[] { new Money(3), new Money(6), new Money(1) }, GetValues(result));
+		Assert.Equal(new[] { new Money(3), new Money(1), new Money(4) }, GetValues(result));
 	}
 
 	[Fact]
@@ -610,7 +630,7 @@ public class CoinSelectionHelpersTests
 		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
 
 		// Assert
-		Assert.Equal(new[] { new Money(6), new Money(10), new Money(3) }, GetValues(result));
+		Assert.Equal(new[] { new Money(6), new Money(4), new Money(7) }, GetValues(result));
 	}
 
 	[Fact]
@@ -635,6 +655,6 @@ public class CoinSelectionHelpersTests
 		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount, tolerance);
 
 		// Assert
-		Assert.Equal(new[] { new Money(3), new Money(8), new Money(9) }, GetValues(result));
+		Assert.Equal(new[] { new Money(6), new Money(5), new Money(7) }, GetValues(result));
 	}
 }
