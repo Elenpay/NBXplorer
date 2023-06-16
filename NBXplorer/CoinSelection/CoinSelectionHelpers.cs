@@ -35,27 +35,18 @@ public class Tolerance
 
 public static class CoinSelectionHelpers
 {
-	public static string OrderBy(CoinSelectionStrategy strategy, double number = 0)
+	public static string OrderBy(CoinSelectionStrategy strategy, long target = 0)
 	{
 		switch (strategy)
 		{
 			case CoinSelectionStrategy.BiggestFirst:
 				return "value DESC";
 			case CoinSelectionStrategy.ClosestToTargetFirst:
-				return $"abs(value - {number})";
+				return $"abs(value - {target})";
 			case CoinSelectionStrategy.SmallestFirst:
 			default:
 				return "value ASC";
 		}
-	}
-
-	public static double GetClosestTo(double? closestTo, long amount, int limit)
-	{
-		if (closestTo == null && limit == 0)
-		{
-			return 0;
-		}
-		return closestTo ?? Math.Truncate((double)(amount / limit));
 	}
 
 	public static List<UTXO> SelectCoins(List<UTXO> UTXOs, int limit, long amount, int tol = 0)
