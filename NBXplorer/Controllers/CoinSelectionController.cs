@@ -28,6 +28,18 @@ namespace NBXplorer.Controllers
 
 		private DbConnectionFactory ConnectionFactory { get; }
 
+		/// <summary>
+		/// Same as utxos endpoint but with a limit on the utxos
+		/// </summary>
+		/// <param name="cryptoCode"></param>
+		/// <param name="derivationScheme"></param>
+		/// <param name="address"></param>
+		/// <param name="amount"></param>
+		/// <param name="limit"></param>
+		/// <param name="closestTo"></param>
+		/// <param name="strategy"></param>
+		/// <returns></returns>
+		/// <exception cref="ArgumentNullException"></exception>
 		[HttpGet]
 		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/selectutxos")]
 		[Route("cryptos/{cryptoCode}/addresses/{address}/selectutxos")]
@@ -38,9 +50,9 @@ namespace NBXplorer.Controllers
 			DerivationStrategyBase derivationScheme,
 			[ModelBinder(BinderType = typeof(BitcoinAddressModelBinder))]
 			BitcoinAddress address,
+			// Added selection parameters
 			[FromQuery(Name = "amount")] long amount,
 			[FromQuery(Name = "limit")] int limit = 0,
-			[FromQuery(Name = "tolerance")] int tolerance = 0,
 			[FromQuery(Name = "closestTo")] long? closestTo = null,
 			[FromQuery(Name = "strategy")] CoinSelectionStrategy strategy = CoinSelectionStrategy.SmallestFirst)
 		{
@@ -69,7 +81,8 @@ namespace NBXplorer.Controllers
 				descriptorColumns = "ds.metadata->>'redeem' redeem, nbxv1_get_keypath(d.metadata, ds.idx) AS keypath, d.metadata->>'feature' feature";
 			}
 
-			var utxos = (await conn.QueryAsync<(
+			// Added OrderBy to the query
+			var utxos = await conn.QueryAsync<(
 				long? blk_height,
 				string tx_id,
 				int idx,
@@ -83,14 +96,15 @@ namespace NBXplorer.Controllers
 				bool input_mempool,
 				DateTime tx_seen_at)>(
 				$"SELECT blk_height, tx_id, wu.idx, value, script, {addrColumns}, {descriptorColumns}, mempool, input_mempool, seen_at " +
-				$"FROM wallets_utxos wu{descriptorJoin} WHERE code=@code AND wallet_id=@walletId AND immature IS FALSE AND value > 546" +
-				$"ORDER BY {CoinSelectionHelpers.OrderBy(strategy, closestTo ?? 0)}", new { code = network.CryptoCode, walletId = repo.GetWalletKey(trackedSource).wid }));
+				$"FROM wallets_utxos wu{descriptorJoin} WHERE code='{network.CryptoCode}' AND wallet_id='{repo.GetWalletKey(trackedSource).wid}' AND immature IS FALSE AND value > 546" +
+				$"ORDER BY {CoinSelectionHelpers.OrderBy(strategy, closestTo ?? 0)}");
 			UTXOChanges changes = new UTXOChanges()
 			{
 				CurrentHeight = (int)height,
 				TrackedSource = trackedSource,
 				DerivationStrategy = derivationScheme
 			};
+			// Removed ordering from this line with respect to the original endpoint
 			foreach (var utxo in utxos)
 			{
 				var u = new UTXO()
@@ -114,16 +128,19 @@ namespace NBXplorer.Controllers
 					u.Feature = Enum.Parse<DerivationFeature>(utxo.feature);
 				}
 				u.Address = utxo.address is null ? u.ScriptPubKey.GetDestinationAddress(network.NBitcoinNetwork) : BitcoinAddress.Create(utxo.address, network.NBitcoinNetwork);
-				if (!utxo.mempool)
-					changes.Confirmed.UTXOs.Add(u);
-				else if (!utxo.input_mempool)
+
+				// Inverted clauses for clarity
+				if (utxo.mempool)
 					changes.Unconfirmed.UTXOs.Add(u);
-				if (utxo.input_mempool && !utxo.mempool)
+				else if (utxo.input_mempool)
 					changes.Unconfirmed.SpentOutpoints.Add(u.Outpoint);
+				else
+					changes.Confirmed.UTXOs.Add(u);
 			}
 
-			changes.Confirmed.UTXOs = CoinSelectionHelpers.SelectCoins(changes.Confirmed.UTXOs, limit, amount, tolerance);
-			changes.Unconfirmed.UTXOs = CoinSelectionHelpers.SelectCoins(changes.Unconfirmed.UTXOs, limit, amount, tolerance);
+			// Added the coin selection
+			changes.Confirmed.UTXOs = CoinSelectionHelpers.SelectCoins(changes.Confirmed.UTXOs, limit, amount);
+			changes.Unconfirmed.UTXOs = CoinSelectionHelpers.SelectCoins(changes.Unconfirmed.UTXOs, limit, amount);
 			return Json(changes, network.JsonSerializerSettings);
 		}
 	}

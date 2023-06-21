@@ -24,6 +24,25 @@
       "applicationUrl": "http://localhost:4774",
       "launchUrl": "v1/cryptos/ltc/status"
     },
+
+    "NBXplorer - Elenpay Dev": {
+      "commandName": "Project",
+      "commandLineArgs": "--chains=btc --network=regtest",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "NBXPLORER_EXPOSERPC": "true",
+        "NBXPLORER_POSTGRES": "User ID=postgres;Host=localhost;Port=35432;Database=nbxplorer",
+        "NBXPLORER_BTCRPCUSER": "polaruser",
+        "NBXPLORER_BTCRPCPASSWORD": "polarpass",
+        "NBXPLORER_BTCRPCURL": "http://localhost:18443/",
+        "NBXPLORER_BTCNODEENDPOINT": "127.0.0.1:19444",
+        "NBXPLORER_BIND": "localhost:12838",
+        "NBXPLORER_NOAUTH": 1
+      },
+      "applicationUrl": "http://localhost:4774"
+    },
+
     "NBXplorer - BTC & LBTC on Regtest from Docker": {
       "commandName": "Project",
       "launchBrowser": true,
