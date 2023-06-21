@@ -5,34 +5,6 @@ using NBXplorer.Models;
 
 namespace NBXplorer;
 
-public class Tolerance
-{
-	public bool enabled = false;
-	private Money minTolerance = new Money(0);
-	private Money maxTolerance = new Money(0);
-
-	public Tolerance()
-	{
-	}
-
-	public Tolerance(long amount, int tolerance)
-	{
-		enabled = true;
-		minTolerance = new Money((long)Math.Floor(amount * (1 - (decimal)tolerance / 100)));
-		maxTolerance = new Money((long)Math.Ceiling(amount * (1 + (decimal)tolerance / 100)));
-	}
-
-	public bool Equals(Money amount)
-	{
-		if (enabled)
-		{
-			return minTolerance <= amount && maxTolerance >= amount;
-		}
-
-		return false;
-	}
-}
-
 public static class CoinSelectionHelpers
 {
 	public static string OrderBy(CoinSelectionStrategy strategy, long target = 0)
@@ -49,7 +21,7 @@ public static class CoinSelectionHelpers
 		}
 	}
 
-	public static List<UTXO> SelectCoins(List<UTXO> UTXOs, int limit, long amount, int tol = 0)
+	public static List<UTXO> SelectCoins(List<UTXO> UTXOs, int limit, long amount)
 	{
 		if (limit == 0)
 		{
@@ -58,12 +30,6 @@ public static class CoinSelectionHelpers
 
 		var utxosQueued = new Queue<UTXO>(UTXOs);
 		var targetAmount = new Money(amount);
-		var tolerance = new Tolerance();
-		if (tol > 0)
-		{
-			tolerance = new Tolerance(amount, tol);
-		}
-
 		var currentAmount = new Money(0);
 		var count = 0;
 		var retroCount = limit;
@@ -73,7 +39,7 @@ public static class CoinSelectionHelpers
 		{
 			var utxo = utxosQueued.Dequeue();
 			var utxoValue = (Money)utxo.Value;
-			if (!tolerance.enabled && currentAmount < targetAmount || tolerance.enabled && !tolerance.Equals(currentAmount))
+			if (currentAmount < targetAmount)
 			{
 				if (count >= limit && currentAmount < targetAmount)
 				{
@@ -94,7 +60,7 @@ public static class CoinSelectionHelpers
 			}
 		}
 
-		if (!tolerance.enabled && currentAmount < targetAmount || tolerance.enabled && !tolerance.Equals(currentAmount))
+		if (currentAmount < targetAmount)
 		{
 			selectedCoins.Clear();
 		}
