@@ -2,10 +2,13 @@ using System.Collections.Generic;
 using System.Linq;
 using NBitcoin;
 using NBXplorer;
+using NBXplorer.CoinSelection.SelectionStrategies;
 using NBXplorer.Models;
 using Xunit;
 
-public class CoinSelectionHelpersTests
+namespace NBXplorer.Tests.CoinSelection.SelectionStrategies;
+
+public class SmallestFirstTests
 {
 	public static List<IMoney> GetValues(List<UTXO> utxos)
 	{
@@ -21,9 +24,10 @@ public class CoinSelectionHelpersTests
 		// Arrange
 		int limit = 3;
 		long amount = 10;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(new List<UTXO>(), limit, amount);
+		var result = coinSelector.SelectCoins(new List<UTXO>(), limit, amount);
 
 		// Assert
 		Assert.Empty(result);
@@ -39,9 +43,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(10) }, GetValues(result));
@@ -57,9 +62,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 7;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(8) }, GetValues(result));
@@ -75,9 +81,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Empty(GetValues(result));
@@ -93,9 +100,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Empty(GetValues(result));
@@ -117,9 +125,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(1), new Money(2), new Money(6) }, GetValues(result));
@@ -139,9 +148,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(1), new Money(5), new Money(5) }, GetValues(result));
@@ -162,9 +172,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 12;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(5), new Money(5), new Money(5) }, GetValues(result));
@@ -186,9 +197,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 20;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(5), new Money(5), new Money(10) }, GetValues(result));
@@ -210,9 +222,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(6), new Money(3) }, GetValues(result));
@@ -232,9 +245,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 9;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(5), new Money(5) }, GetValues(result));
@@ -254,9 +268,10 @@ public class CoinSelectionHelpersTests
 		};
 		int limit = 3;
 		long amount = 14;
+		var coinSelector = new SmallestFirst();
 
 		// Act
-		var result = CoinSelectionHelpers.SelectCoins(utxos, limit, amount);
+		var result = coinSelector.SelectCoins(utxos, limit, amount);
 
 		// Assert
 		Assert.Equal(new[] { new Money(5), new Money(6), new Money(4) }, GetValues(result));
