@@ -9,17 +9,14 @@ public static class CoinSelectionHelpers
 {
 	public static string OrderBy(CoinSelectionStrategy strategy, long target = 0)
 	{
-		switch (strategy)
+		return strategy switch
 		{
-			case CoinSelectionStrategy.BiggestFirst:
-			case CoinSelectionStrategy.UpToAmount:
-				return "value DESC";
-			case CoinSelectionStrategy.ClosestToTargetFirst:
-				return $"abs(value - {target})";
-			case CoinSelectionStrategy.SmallestFirst:
-			default:
-				return "value ASC";
-		}
+			CoinSelectionStrategy.BiggestFirst => "value DESC",
+			CoinSelectionStrategy.UpToAmount => "value DESC",
+			CoinSelectionStrategy.ClosestToTargetFirst => $"abs(value - {target})",
+			CoinSelectionStrategy.SmallestFirst => "value ASC",
+			_ => throw new ArgumentOutOfRangeException(nameof(strategy), $@"Not expected strategy value: {strategy}"),
+		};
 	}
 }
 

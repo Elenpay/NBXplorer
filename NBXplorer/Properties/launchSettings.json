@@ -28,7 +28,6 @@
     "NBXplorer - Elenpay Dev": {
       "commandName": "Project",
       "commandLineArgs": "--chains=btc --network=regtest",
-      "launchBrowser": true,
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "NBXPLORER_EXPOSERPC": "true",
