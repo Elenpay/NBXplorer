@@ -82,7 +82,7 @@ namespace NBXplorer.Controllers
 				descriptorColumns = "ds.metadata->>'redeem' redeem, nbxv1_get_keypath(d.metadata, ds.idx) AS keypath, d.metadata->>'feature' feature";
 			}
 
-			var belowAmount = strategy == CoinSelectionStrategy.UpToAmount ? $"AND value < {amount}" : "";
+			var belowAmount = strategy == CoinSelectionStrategy.UpToAmount ? $"AND value <= {amount}" : "";
 			// Added OrderBy to the query
 			var utxos = await conn.QueryAsync<(
 				long? blk_height,
