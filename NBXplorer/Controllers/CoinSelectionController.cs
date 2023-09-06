@@ -40,6 +40,7 @@ namespace NBXplorer.Controllers
 		/// <param name="limit"></param>
 		/// <param name="closestTo"></param>
 		/// <param name="strategy"></param>
+		/// <param name="ignoreOutpoint"></param>
 		/// <returns></returns>
 		/// <exception cref="ArgumentNullException"></exception>
 		[HttpGet]
@@ -56,7 +57,8 @@ namespace NBXplorer.Controllers
 			[FromQuery(Name = "amount")] long amount,
 			[FromQuery(Name = "limit")] int limit = 0,
 			[FromQuery(Name = "closestTo")] long? closestTo = null,
-			[FromQuery(Name = "strategy")] CoinSelectionStrategy strategy = CoinSelectionStrategy.SmallestFirst)
+			[FromQuery(Name = "strategy")] CoinSelectionStrategy strategy = CoinSelectionStrategy.SmallestFirst,
+			[FromQuery(Name = "ignoreOutpoint")] string[] ignoreOutpoint = null)
 		{
 			var trackedSource = GetTrackedSource(derivationScheme, address);
 			if (trackedSource == null)
@@ -131,6 +133,8 @@ namespace NBXplorer.Controllers
 					u.Feature = Enum.Parse<DerivationFeature>(utxo.feature);
 				}
 				u.Address = utxo.address is null ? u.ScriptPubKey.GetDestinationAddress(network.NBitcoinNetwork) : BitcoinAddress.Create(utxo.address, network.NBitcoinNetwork);
+
+				if (ignoreOutpoint != null && ignoreOutpoint.Contains(u.Outpoint.ToString())) continue;
 
 				// Inverted clauses for clarity
 				if (utxo.mempool)
