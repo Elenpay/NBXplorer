@@ -8,6 +8,7 @@ using NBXplorer.DerivationStrategy;
 using NBXplorer.ModelBinders;
 using NBXplorer.Models;
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using NBXplorer.CoinSelection.SelectionStrategies;
 
@@ -139,6 +140,9 @@ namespace NBXplorer.Controllers
 				else
 					changes.Confirmed.UTXOs.Add(u);
 			}
+
+			changes.Confirmed.UTXOs = changes.Confirmed.UTXOs.DistinctBy(x => x.Outpoint).ToList();
+			changes.Unconfirmed.UTXOs = changes.Unconfirmed.UTXOs.DistinctBy(x => x.Outpoint).ToList();
 
 			ISelectionStrategies selectionStrategy;
 			switch (strategy)
