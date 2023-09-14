@@ -28,7 +28,6 @@
     "NBXplorer - Elenpay Dev": {
       "commandName": "Project",
       "commandLineArgs": "--chains=btc --network=regtest",
-      "launchBrowser": true,
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "NBXPLORER_EXPOSERPC": "true",
@@ -37,7 +36,7 @@
         "NBXPLORER_BTCRPCPASSWORD": "polarpass",
         "NBXPLORER_BTCRPCURL": "http://localhost:18443/",
         "NBXPLORER_BTCNODEENDPOINT": "127.0.0.1:19444",
-        "NBXPLORER_BIND": "localhost:12838",
+        "NBXPLORER_BIND": "localhost:32838",
         "NBXPLORER_NOAUTH": 1
       },
       "applicationUrl": "http://localhost:4774"
