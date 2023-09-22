@@ -165,19 +165,25 @@ namespace NBXplorer
 		{
 			var network = client.Network.NetworkSet;
 			var walletName = client.CredentialString.WalletName ?? "";
+			bool created = false;
 			try
 			{
 				await client.CreateWalletAsync(walletName, new CreateWalletOptions()
 				{
 					LoadOnStartup = true,
-					Blank = client.Network.ChainName !=	ChainName.Regtest
+					Blank = client.Network.ChainName != ChainName.Regtest
 				});
 				logger.LogInformation($"{network.CryptoCode}: Created RPC wallet \"{walletName}\"");
+				created = true;
 			}
-			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND || ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR)
+			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
 			{
-				// Not supported, or already created? Just ignore.
+				// Not supported
 				return;
+			}
+			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR || ex.RPCCode == RPCErrorCode.RPC_WALLET_ALREADY_EXISTS)
+			{
+				// Already exists, let's load it
 			}
 			catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized || ex.StatusCode is HttpStatusCode.Forbidden)
 			{
@@ -187,20 +193,23 @@ namespace NBXplorer
 			catch (Exception ex)
 			{
 				logger.LogWarning(ex, $"{network.CryptoCode}: Failed to create a RPC wallet with unknown error, skipping...");
-				return;
 			}
 			try
 			{
 				await client.LoadWalletAsync(walletName, true);
 				logger.LogInformation($"{network.CryptoCode}: RPC Wallet loaded");
 			}
-			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND || ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR)
+			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND || ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR || ex.RPCCode == RPCErrorCode.RPC_WALLET_ALREADY_LOADED)
 			{
 				// Not supported, or already loaded? Just ignore.
 			}
 			catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized || ex.StatusCode is HttpStatusCode.Forbidden)
 			{
 				// Not allowed, which is fine
+			}
+			catch when (!created)
+			{
+				// Let's skip, a rpc wallet isn't essential
 			}
 		}
 

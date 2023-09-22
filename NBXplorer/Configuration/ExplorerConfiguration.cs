@@ -87,15 +87,19 @@ namespace NBXplorer.Configuration
 		{
 			get; set;
 		} = 20;
-		public bool IsPostgres { get; set; }
-		public bool IsDbTrie { get; set; }
-		public bool NoMigrateEvents { get; private set; }
-		public bool NoMigrateRawTxs { get; private set; }
 		public int MaxGapSize
 		{
 			get; set;
 		} = 30;
+#if SUPPORT_DBTRIE
+		public bool IsPostgres { get; set; }
+		public bool IsDbTrie { get; set; }
+		public bool NoMigrateEvents { get; private set; }
+		public bool NoMigrateRawTxs { get; private set; }
 		public int DBCache { get; set; }
+#else
+		public bool IsPostgres => true;
+#endif
 		public List<ChainConfiguration> ChainConfigurations
 		{
 			get; set;
@@ -167,13 +171,27 @@ namespace NBXplorer.Configuration
 			var invalidChains = String.Join(',', supportedChains.Where(s => !validChains.Contains(s)).ToArray());
 			if(!string.IsNullOrEmpty(invalidChains))
 				throw new ConfigException($"Invalid chains {invalidChains} for {NetworkProvider.NetworkType}");
+			SocksEndpoint = config.GetOrDefault<string>($"socks.endpoint", null) is string e ? NBitcoin.Utils.ParseEndpoint(e, 1080) : null;
+			if (SocksEndpoint != null)
+			{
+				Logs.Configuration.LogInformation("Socks endpoint: " + SocksEndpoint.ToEndpointString());
+				var user = config.GetOrDefault<string>("socks.user", null);
+				var pass = config.GetOrDefault<string>("socks.password", null);
+				if (user != null && pass != null)
+				{
+					Logs.Configuration.LogInformation("Socks credentials detected");
+					SocksCredentials = new NetworkCredential(user, pass);
+				}
+			}
 
 			Logs.Configuration.LogInformation("Supported chains: " + String.Join(',', supportedChains.ToArray()));
 			MinGapSize = config.GetOrDefault<int>("mingapsize", 20);
 			MaxGapSize = config.GetOrDefault<int>("maxgapsize", 30);
+#if SUPPORT_DBTRIE
 			DBCache = config.GetOrDefault<int>("dbcache", 50);
 			if (DBCache > 0)
 				Logs.Configuration.LogInformation($"DBCache: {DBCache} MB");
+#endif
 			if (MinGapSize >= MaxGapSize)
 				throw new ConfigException("mingapsize should be equal or lower than maxgapsize");
 			if(!Directory.Exists(BaseDataDir))
@@ -185,7 +203,9 @@ namespace NBXplorer.Configuration
 			SignalFilesDir = SignalFilesDir ?? DataDir;
 			if (!Directory.Exists(SignalFilesDir))
 				Directory.CreateDirectory(SignalFilesDir);
+#if SUPPORT_DBTRIE
 			CacheChain = config.GetOrDefault<bool>("cachechain", true);
+#endif
 			NoAuthentication = config.GetOrDefault<bool>("noauth", false);
 			InstanceName = config.GetOrDefault<string>("instancename", "");
 			TrimEvents = config.GetOrDefault<int>("trimevents", -1);
@@ -212,6 +232,7 @@ namespace NBXplorer.Configuration
 			RabbitMqPassword = config.GetOrDefault<string>("rmqpass", "");
 			RabbitMqTransactionExchange = config.GetOrDefault<string>("rmqtranex", "");
 			RabbitMqBlockExchange = config.GetOrDefault<string>("rmqblockex", "");
+#if SUPPORT_DBTRIE
 			IsPostgres = config.IsPostgres();
 			IsDbTrie = config.GetOrDefault<bool>("dbtrie", false); ;
 			NoMigrateEvents = config.GetOrDefault<bool>("nomigrateevts", false);
@@ -230,6 +251,7 @@ namespace NBXplorer.Configuration
 			{
 				throw new ConfigException("You need to select your backend implementation. But --dbtrie and --postgres are both specified.");
 			}
+#endif
 			return this;
 		}
 
@@ -247,11 +269,13 @@ namespace NBXplorer.Configuration
 			return ChainConfigurations.Any(c => network.CryptoCode == c.CryptoCode);
 		}
 
+#if SUPPORT_DBTRIE
 		public bool CacheChain
 		{
 			get;
 			set;
 		}
+#endif
 		public bool NoAuthentication
 		{
 			get;
@@ -300,5 +324,7 @@ namespace NBXplorer.Configuration
         public string RabbitMqBlockExchange { get; set; }
 
 		public KeyPathTemplate CustomKeyPathTemplate { get; set; }
+		public EndPoint SocksEndpoint { get; set; }
+		public NetworkCredential SocksCredentials { get; set; }
 	}
 }
