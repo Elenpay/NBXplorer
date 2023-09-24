@@ -970,7 +970,8 @@ namespace NBXplorer.Tests
 				builder.AddProvider(new XUnitLoggerProvider(Logs));
 			});
 			NBXplorer.Logging.Logs.Configure(container.BuildServiceProvider().GetRequiredService<ILoggerFactory>());
-			new Startup(conf).ConfigureServices(container);
+			
+			new Startup(conf,null,null).ConfigureServices(container);
 			var provider = container.BuildServiceProvider();
 			foreach (var service in provider.GetServices<IHostedService>())
 				if (service is HostedServices.DatabaseSetupHostedService)
