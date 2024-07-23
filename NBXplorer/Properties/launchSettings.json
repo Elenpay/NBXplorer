@@ -31,13 +31,14 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "NBXPLORER_EXPOSERPC": "true",
-        "NBXPLORER_POSTGRES": "User ID=postgres;Host=localhost;Port=35432;Database=nbxplorer",
+        "NBXPLORER_POSTGRES": "Host=localhost;Port=35432;Database=nbxplorer;User ID=rw_dev;Password=rw_dev",
         "NBXPLORER_BTCRPCUSER": "polaruser",
         "NBXPLORER_BTCRPCPASSWORD": "polarpass",
         "NBXPLORER_BTCRPCURL": "http://localhost:18443/",
         "NBXPLORER_BTCNODEENDPOINT": "127.0.0.1:19444",
-        "NBXPLORER_BIND": "localhost:32838",
-        "NBXPLORER_NOAUTH": 1
+        "NBXPLORER_BIND": "127.0.0.1:32838",
+        "NBXPLORER_NOAUTH": "1",
+        "NBXPLORER_DBTRIE": "0"
       },
       "applicationUrl": "http://localhost:4774"
     },
