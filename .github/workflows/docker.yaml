@@ -6,7 +6,6 @@ on:
       - '*'
     branches:
       - elenpay-develop
-      - feat/net8
 
 env:
   REGISTRY: ghcr.io
