@@ -2,7 +2,6 @@
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
-using System.Text;
 
 namespace NBXplorer.Models
 {
@@ -90,10 +89,10 @@ namespace NBXplorer.Models
 			get; set;
 		} = new List<MatchedOutput>();
 
-		public List<MatchedOutput> Inputs
+		public List<MatchedInput> Inputs
 		{
 			get; set;
-		} = new List<MatchedOutput>();
+		} = new List<MatchedInput>();
 		public DateTimeOffset Timestamp
 		{
 			get;

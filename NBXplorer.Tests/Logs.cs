@@ -1,6 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
 using System;
-using System.Collections.Generic;
 using System.Text;
 using Xunit.Abstractions;
 
@@ -70,8 +69,12 @@ namespace NBXplorer.Tests
 
 		public void LogInformation(string msg)
 		{
-			if(msg != null)
-				_Helper.WriteLine(DateTimeOffset.UtcNow + " :" + Name + ":   " + msg);
+			if (msg != null)
+				try
+				{
+					_Helper.WriteLine(DateTimeOffset.UtcNow + " :" + Name + ":   " + msg);
+				}
+				catch { }
 		}
 	}
 	public class Logs

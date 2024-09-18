@@ -1,7 +1,7 @@
 ﻿using Dapper;
 using NBitcoin;
-using NBXplorer.Backends;
-using NBXplorer.Backends.Postgres;
+using NBXplorer.Backend;
+
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,7 +12,7 @@ namespace NBXplorer.HostedServices
 	{
 		public CheckMempoolTransactionsPeriodicTask(
 			DbConnectionFactory dbConnectionFactory,
-			IIndexers indexers,
+			Indexers indexers,
 			Broadcaster broadcaster)
 		{
 			DbConnectionFactory = dbConnectionFactory;
@@ -21,7 +21,7 @@ namespace NBXplorer.HostedServices
 		}
 
 		public DbConnectionFactory DbConnectionFactory { get; }
-		public IIndexers Indexers { get; }
+		public Indexers Indexers { get; }
 		public Broadcaster Broadcaster { get; }
 
 		public async Task Do(CancellationToken cancellationToken)
@@ -45,9 +45,9 @@ namespace NBXplorer.HostedServices
 			foreach (var tx in txs)
 			{
 				var result = await Broadcaster.Broadcast(tx.Network, tx.Tx, tx.Id);
-				if (result.MissingInput && result.MempoolConflict)
+				if (result.MempoolConflict)
 				{
-					await conn.ExecuteAsync("UPDATE txs SET replaced_by=@unk_tx_id WHERE code=@code AND tx_id=@tx_id AND mempool IS TRUE AND replaced_by IS NULL AND replaced_by!=@unk_tx_id", new { code = tx.Network.CryptoCode, tx_id = tx.Id.ToString(), unk_tx_id = NBXplorerNetwork.UnknownTxId.ToString() });
+					await conn.ExecuteAsync("UPDATE txs SET replaced_by=@unk_tx_id WHERE code=@code AND tx_id=@tx_id AND mempool IS TRUE AND replaced_by IS NULL", new { code = tx.Network.CryptoCode, tx_id = tx.Id.ToString(), unk_tx_id = NBXplorerNetwork.UnknownTxId.ToString() });
 				}
 				else if (result.MissingInput || result.UnknownError)
 				{

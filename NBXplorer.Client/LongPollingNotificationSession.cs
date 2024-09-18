@@ -1,13 +1,11 @@
 ﻿using System;
 using System.Linq;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Net.Http;
 using Newtonsoft.Json.Linq;
 using NBXplorer.Models;
-using System.Collections.Concurrent;
 
 namespace NBXplorer
 {
@@ -77,7 +75,7 @@ namespace NBXplorer
 			if (longPolling)
 				parameters.Add($"longPolling={longPolling}");
 			var parametersString = parameters.Count == 0 ? string.Empty : $"?{String.Join("&", parameters.ToArray<object>())}";
-			var evts = await Client.SendAsync<JArray>(HttpMethod.Get, null, $"v1/cryptos/{Client.CryptoCode}/events{parametersString}", null, cancellation);
+			var evts = await Client.SendAsync<JArray>(HttpMethod.Get, null, $"v1/cryptos/{Client.CryptoCode}/events{ExplorerClient.Raw(parametersString)}", cancellation);
 
 			var evtsObj = evts.Select(ev => NewEventBase.ParseEvent((JObject)ev, Client.Serializer.Settings))
 					  .OfType<NewEventBase>()
@@ -96,7 +94,7 @@ namespace NBXplorer
 			if (limit != 10)
 				parameters.Add($"limit={limit}");
 			var parametersString = parameters.Count == 0 ? string.Empty : $"?{String.Join("&", parameters.ToArray<object>())}";
-			var evts = await Client.SendAsync<JArray>(HttpMethod.Get, null, $"v1/cryptos/{Client.CryptoCode}/events/latest{parametersString}", null, cancellation);
+			var evts = await Client.SendAsync<JArray>(HttpMethod.Get, null, $"v1/cryptos/{Client.CryptoCode}/events/latest{ExplorerClient.Raw(parametersString)}", cancellation);
 
 			var evtsObj = evts.Select(ev => NewEventBase.ParseEvent((JObject)ev, Client.Serializer.Settings))
 					  .OfType<NewEventBase>()

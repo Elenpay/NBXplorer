@@ -1,7 +1,4 @@
 using NBitcoin.Tests;
-using System;
-using System.Collections.Generic;
-using System.Text;
 using NBitcoin;
 
 namespace NBXplorer.Tests
@@ -65,7 +62,7 @@ namespace NBXplorer.Tests
 			//Network = NBitcoin.Altcoins.Viacoin.Instance.Regtest;
 
 			//CryptoCode = "GRS";
-			//nodeDownloadData = NodeDownloadData.Groestlcoin.v24_0_1;
+			//nodeDownloadData = NodeDownloadData.Groestlcoin.v26_0;
 			//Network = NBitcoin.Altcoins.Groestlcoin.Instance.Regtest;
 
 			//CryptoCode = "BTX";

@@ -1,47 +1,38 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
-using NBXplorer.Logging;
 using NBXplorer.ModelBinders;
 using NBXplorer.Models;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using NBitcoin.RPC;
 using NBXplorer.Analytics;
-using NBXplorer.Backends;
+using NBXplorer.Backend;
 
 namespace NBXplorer.Controllers
 {
 	public partial class MainController
 	{
 		[HttpPost]
-		[Route("cryptos/{network}/derivations/{strategy}/psbt/create")]
+		[Route($"{CommonRoutes.DerivationEndpoint}/psbt/create")]
+		[TrackedSourceContext.TrackedSourceContextRequirement(allowedTrackedSourceTypes: typeof(DerivationSchemeTrackedSource))]
 		public async Task<IActionResult> CreatePSBT(
-			[ModelBinder(BinderType = typeof(NetworkModelBinder))]
-			NBXplorerNetwork network,
-			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
-			DerivationStrategyBase strategy,
+			TrackedSourceContext trackedSourceContext,
 			[FromBody]
-			JObject body,
-			[FromServices]
-			IUTXOService utxoService)
+			JObject body)
 		{
 			if (body == null)
 				throw new ArgumentNullException(nameof(body));
-			CreatePSBTRequest request = ParseJObject<CreatePSBTRequest>(body, network);
-			if (strategy == null)
-				throw new ArgumentNullException(nameof(strategy));
+			var network = trackedSourceContext.Network;
+			CreatePSBTRequest request = network.ParseJObject<CreatePSBTRequest>(body);
 
 			var repo = RepositoryProvider.GetRepository(network);
 			var txBuilder = request.Seed is int s ? network.NBitcoinNetwork.CreateTransactionBuilder(s)
 												: network.NBitcoinNetwork.CreateTransactionBuilder();
-
+			var strategy = ((DerivationSchemeTrackedSource) trackedSourceContext.TrackedSource).DerivationStrategy;
 			CreatePSBTSuggestions suggestions = null;
 			if (!(request.DisableFingerprintRandomization is true) &&
 				fingerprintService.GetDistribution(network) is FingerprintDistribution distribution)
@@ -107,6 +98,11 @@ namespace NBXplorer.Controllers
 				txBuilder.StandardTransactionPolicy.MinRelayTxFee = feeRate;
 			}
 
+			if(request.MergeOutputs is bool mergeOutputs)
+			{
+				txBuilder.MergeOutputs = mergeOutputs;
+			}
+
 			txBuilder.OptInRBF = !(request.RBF is false);
 			if (request.LockTime is LockTime lockTime)
 			{
@@ -152,11 +148,27 @@ namespace NBXplorer.Controllers
 					txBuilder.SetLockTime(new LockTime(0));
 				}
 			}
-			var utxos = (await utxoService.GetUTXOs(network.CryptoCode, strategy)).As<UTXOChanges>().GetUnspentUTXOs(request.MinConfirmations);
+			var utxoChanges = (await CommonRoutesController.GetUTXOs(trackedSourceContext)).As<UTXOChanges>();
+			var utxos = utxoChanges.GetUnspentUTXOs(request.MinConfirmations);
 			var availableCoinsByOutpoint = utxos.ToDictionary(o => o.Outpoint);
 			if (request.IncludeOnlyOutpoints != null)
 			{
 				var includeOnlyOutpoints = request.IncludeOnlyOutpoints.ToHashSet();
+				// IncludeOnlyOutpoints has the ability to include UTXOs that are spent by unconfirmed UTXOs
+				{
+					// We need to add the unconfirmed utxos that are spent by unconfirmed utxos
+					foreach (var u in utxoChanges.SpentUnconfirmed)
+					{
+						availableCoinsByOutpoint.TryAdd(u.Outpoint, u);
+					}
+					// We need to add the confirmed utxos that are spent by unconfirmed utxos
+					var spentConfs = utxoChanges.Unconfirmed.SpentOutpoints.Select(o => o.Hash).ToHashSet();
+					foreach (var u in utxoChanges.Confirmed.UTXOs)
+					{
+						if (spentConfs.Contains(u.Outpoint.Hash))
+							availableCoinsByOutpoint.TryAdd(u.Outpoint, u);
+					}
+				}
 				availableCoinsByOutpoint = availableCoinsByOutpoint.Where(c => includeOnlyOutpoints.Contains(c.Key)).ToDictionary(o => o.Key, o => o.Value);
 			}
 
@@ -180,7 +192,7 @@ namespace NBXplorer.Controllers
 			if (network.CryptoCode == "BTC" && unconfUtxos.Count > 0 && request.MinConfirmations == 0)
 			{
 				HashSet<uint256> requestedTxs = new HashSet<uint256>();
-				var rpc = RPCClients.Get(network);
+				var rpc = trackedSourceContext.RpcClient;
 				rpc = rpc.PrepareBatch();
 				var mempoolEntries = 
 					unconfUtxos
@@ -225,19 +237,13 @@ namespace NBXplorer.Controllers
 				coins = availableCoinsByOutpoint.Values.Select(v => v.AsCoin()).ToArray();
 			}
 			txBuilder.AddCoins(coins);
-
+			bool sweepAll = false;
 			foreach (var dest in request.Destinations)
 			{
 				if (dest.SweepAll)
 				{
-					try
-					{
-						txBuilder.SendAll(dest.Destination);
-					}
-					catch
-					{
-						throw new NBXplorerException(new NBXplorerError(400, "not-enough-funds", "You can't sweep funds, because you don't have any."));
-					}
+					sweepAll = true;
+					txBuilder.SendAll(dest.Destination);
 				}
 				else
 				{
@@ -259,7 +265,7 @@ namespace NBXplorer.Controllers
 			bool hasChange = false;
 			if (request.ExplicitChangeAddress == null)
 			{
-				var keyInfo = (await GetUnusedAddress(network.CryptoCode, strategy, DerivationFeature.Change, autoTrack: true)).As<KeyPathInformation>();
+				var keyInfo = (await GetUnusedAddress(trackedSourceContext, DerivationFeature.Change, autoTrack: true)).As<KeyPathInformation>();
 				change = (keyInfo.ScriptPubKey, keyInfo.KeyPath);
 			}
 			else
@@ -309,12 +315,29 @@ namespace NBXplorer.Controllers
 						txBuilder.SendEstimatedFees(fallbackFeeRate);
 					}
 				}
+				if (request.SpendAllMatchingOutpoints is true)
+					txBuilder.SendAllRemainingToChange();
 				psbt = txBuilder.BuildPSBT(false);
 				hasChange = psbt.Outputs.Any(o => o.ScriptPubKey == change.ScriptPubKey);
 			}
-			catch (OutputTooSmallException)
+			catch (OutputTooSmallException ex) when (ex.Reason == OutputTooSmallException.ErrorType.TooSmallAfterSubtractedFee)
 			{
-				throw new NBXplorerException(new NBXplorerError(400, "output-too-small", "You can't substract fee on this destination, because not enough money was sent to it"));
+				throw new NBXplorerException(new NBXplorerError(400, "output-too-small",
+					message: "You can't substract fee on this destination, because not enough money was sent to it",
+					reason: OutputTooSmallException.ErrorType.TooSmallAfterSubtractedFee.ToString()));
+			}
+			catch (OutputTooSmallException ex) when (ex.Reason == OutputTooSmallException.ErrorType.TooSmallBeforeSubtractedFee)
+			{
+				if (sweepAll)
+				{
+					throw new NBXplorerException(new NBXplorerError(400, "not-enough-funds", "You can't sweep funds, because you don't have any."));
+				}
+				else
+				{
+					throw new NBXplorerException(new NBXplorerError(400, "output-too-small",
+						message: "The amount is being sent is below dust threshold",
+						reason: OutputTooSmallException.ErrorType.TooSmallBeforeSubtractedFee.ToString()));
+				}
 			}
 			catch (NotEnoughFundsException)
 			{
@@ -323,7 +346,7 @@ namespace NBXplorer.Controllers
 			// We made sure we can build the PSBT, so now we can reserve the change address if we need to
 			if (hasChange && request.ExplicitChangeAddress == null && request.ReserveChangeAddress)
 			{
-				var derivation = (await GetUnusedAddress(network.CryptoCode, strategy, DerivationFeature.Change, reserve: true, autoTrack: true)).As<KeyPathInformation>();
+				var derivation = (await GetUnusedAddress(trackedSourceContext, DerivationFeature.Change, reserve: true, autoTrack: true)).As<KeyPathInformation>();
 				// In most of the time, this is the same as previously, so no need to rebuild PSBT
 				if (derivation.ScriptPubKey != change.ScriptPubKey)
 				{
@@ -365,7 +388,7 @@ namespace NBXplorer.Controllers
 			[FromBody]
 			JObject body)
 		{
-			var update = ParseJObject<UpdatePSBTRequest>(body, network);
+			var update = network.ParseJObject<UpdatePSBTRequest>(body);
 			if (update.PSBT == null)
 				throw new NBXplorerException(new NBXplorerError(400, "missing-parameter", "'psbt' is missing"));
 			await UpdatePSBTCore(update, network);
@@ -420,9 +443,33 @@ namespace NBXplorer.Controllers
 					}
 				}
 			}
+
+			if (update.DerivationScheme is TaprootDerivationStrategy taprootDerivation)
+			{
+				// Adapt the create PSBT for Taproot...
+				// * HDTaprootKeyPaths is used instead of HDKeyPaths
+				// * TaprootSighashType is explicitely set to default
+				// * Fill up TaprootInternalKey
+				foreach (var input in update.PSBT.Inputs)
+				{
+					input.TaprootSighashType = TaprootSigHash.Default;
+					if (input.HDKeyPaths.Count != 1)
+						continue;
+					foreach (var keypath in input.HDKeyPaths)
+					{
+						var taprootPubKey = keypath.Key.GetTaprootFullPubKey();
+						input.TaprootInternalKey = taprootPubKey.InternalKey;
+						// Some consumers expect the internal key to be in the HDTaprootKeyPaths
+						if (!TaprootPubKey.TryCreate(input.TaprootInternalKey.ToBytes(), out var pk))
+							continue;
+						input.HDTaprootKeyPaths.AddOrReplace(pk, new TaprootKeyPath(keypath.Value));
+					}
+					input.HDKeyPaths.Clear();
+				}
+			}
 		}
 
-		private static async Task UpdateHDKeyPathsWitnessAndRedeem(UpdatePSBTRequest update, IRepository repo)
+		private static async Task UpdateHDKeyPathsWitnessAndRedeem(UpdatePSBTRequest update, Repository repo)
 		{
 			var strategy = update.DerivationScheme;
 			var pubkeys = strategy.GetExtPubKeys().Select(p => p.AsHDKeyCache()).ToArray();
@@ -488,7 +535,7 @@ namespace NBXplorer.Controllers
 												!((input.GetSignableCoin() ?? input.GetCoin())?.IsMalleable is false));
 		}
 
-		private async Task UpdateUTXO(UpdatePSBTRequest update, IRepository repo, RPCClient rpc)
+		private async Task UpdateUTXO(UpdatePSBTRequest update, Repository repo, RPCClient rpc)
 		{
 			if (rpc is not null)
 			{
@@ -561,13 +608,6 @@ namespace NBXplorer.Controllers
 				await batch.SendBatchAsync();
 				await getTransactions;
 			}
-		}
-
-		protected T ParseJObject<T>(JObject requestObj, NBXplorerNetwork network)
-		{
-			if (requestObj == null)
-				return default;
-			return network.Serializer.ToObject<T>(requestObj);
 		}
 	}
 }

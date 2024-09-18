@@ -1,52 +1,34 @@
-﻿using Dapper;
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using NBitcoin;
-using NBXplorer.Backends;
-using NBXplorer.Backends.Postgres;
 using NBXplorer.DerivationStrategy;
-using NBXplorer.ModelBinders;
 using NBXplorer.Models;
+using System.Threading.Tasks;
 using System;
 using System.Linq;
-using System.Threading.Tasks;
+using Dapper;
+using NBXplorer.Backend;
+using Newtonsoft.Json.Linq;
 
 namespace NBXplorer.Controllers
 {
-	[Route("v1")]
+	[Route($"v1/{CommonRoutes.DerivationEndpoint}")]
+	[Route($"v1/{CommonRoutes.AddressEndpoint}")]
+	[Route($"v1/{CommonRoutes.BaseCryptoEndpoint}/{CommonRoutes.GroupEndpoint}")]
 	[Authorize]
-	public class PostgresMainController : ControllerBase, IUTXOService
+	public class CommonRoutesController : Controller
 	{
-		public PostgresMainController(
-			DbConnectionFactory connectionFactory,
-			NBXplorerNetworkProvider networkProvider,
-			IRPCClients rpcClients,
-			IIndexers indexers,
-			KeyPathTemplates keyPathTemplates,
-			IRepositoryProvider repositoryProvider) : base(networkProvider, rpcClients, repositoryProvider, indexers)
+		public DbConnectionFactory ConnectionFactory { get; }
+		public CommonRoutesController(DbConnectionFactory connectionFactory)
 		{
 			ConnectionFactory = connectionFactory;
-			KeyPathTemplates = keyPathTemplates;
 		}
-
-		public DbConnectionFactory ConnectionFactory { get; }
-		public KeyPathTemplates KeyPathTemplates { get; }
-
-		[HttpGet]
-		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/balance")]
-		[Route("cryptos/{cryptoCode}/addresses/{address}/balance")]
-		[PostgresImplementationActionConstraint(true)]
-		public async Task<IActionResult> GetBalance(string cryptoCode,
-			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
-			DerivationStrategyBase derivationScheme,
-			[ModelBinder(BinderType = typeof(BitcoinAddressModelBinder))]
-			BitcoinAddress address)
+		[HttpGet("balance")]
+		public async Task<IActionResult> GetBalance(TrackedSourceContext trackedSourceContext)
 		{
-			var trackedSource = GetTrackedSource(derivationScheme, address);
-			if (trackedSource == null)
-				throw new ArgumentNullException(nameof(trackedSource));
-			var network = GetNetwork(cryptoCode, false);
-			var repo = (PostgresRepository)RepositoryProvider.GetRepository(cryptoCode);
+			var trackedSource = trackedSourceContext.TrackedSource;
+			var network = trackedSourceContext.Network;
+			var repo = trackedSourceContext.Repository;
 			await using var conn = await ConnectionFactory.CreateConnection();
 			var b = await conn.QueryAsync("SELECT * FROM wallets_balances WHERE code=@code AND wallet_id=@walletId", new { code = network.CryptoCode, walletId = repo.GetWalletKey(trackedSource).wid });
 			MoneyBag
@@ -87,7 +69,6 @@ namespace NBXplorer.Controllers
 			balance.Total = balance.Confirmed.Add(balance.Unconfirmed);
 			return Json(balance, network.JsonSerializerSettings);
 		}
-
 		private IMoney Format(NBXplorerNetwork network, MoneyBag bag)
 		{
 			if (network.IsElement)
@@ -99,37 +80,24 @@ namespace NBXplorer.Controllers
 				return m;
 			return RemoveZeros(bag);
 		}
-
 		private static MoneyBag RemoveZeros(MoneyBag bag)
 		{
 			// Super hack to know if we deal with zero
 			return new MoneyBag(bag.Where(a => !a.Negate().Equals(a)).ToArray());
 		}
 
-		[HttpGet]
-		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/utxos")]
-		[Route("cryptos/{cryptoCode}/addresses/{address}/utxos")]
-		[PostgresImplementationActionConstraint(true)]
-		public async Task<IActionResult> GetUTXOs(
-			string cryptoCode,
-			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
-			DerivationStrategyBase derivationScheme,
-			[ModelBinder(BinderType = typeof(BitcoinAddressModelBinder))]
-			BitcoinAddress address)
+		[HttpGet("utxos")]
+		public async Task<IActionResult> GetUTXOs(TrackedSourceContext trackedSourceContext)
 		{
-			var trackedSource = GetTrackedSource(derivationScheme, address);
-			if (trackedSource == null)
-				throw new ArgumentNullException(nameof(trackedSource));
-			var network = GetNetwork(cryptoCode, false);
-			var repo = (PostgresRepository)RepositoryProvider.GetRepository(cryptoCode);
-
+			var trackedSource = trackedSourceContext.TrackedSource;
+			var repo = trackedSourceContext.Repository;
+			var network = trackedSourceContext.Network;
 			await using var conn = await ConnectionFactory.CreateConnection();
 			var height = await conn.ExecuteScalarAsync<long>("SELECT height FROM get_tip(@code)", new { code = network.CryptoCode });
-
-
 			// On elements, we can't get blinded address from the scriptPubKey, so we need to fetch it rather than compute it
 			string addrColumns = "NULL as address";
-			if (network.IsElement && !derivationScheme.Unblinded())
+			var derivationScheme = (trackedSource as DerivationSchemeTrackedSource)?.DerivationStrategy;
+			if (network.IsElement && derivationScheme?.Unblinded() is true)
 			{
 				addrColumns = "ds.metadata->>'blindedAddress' as address";
 			}
@@ -187,18 +155,34 @@ namespace NBXplorer.Controllers
 				}
 				u.Address = utxo.address is null ? u.ScriptPubKey.GetDestinationAddress(network.NBitcoinNetwork) : BitcoinAddress.Create(utxo.address, network.NBitcoinNetwork);
 				if (!utxo.mempool)
+				{
 					changes.Confirmed.UTXOs.Add(u);
+					if (utxo.input_mempool)
+						changes.Unconfirmed.SpentOutpoints.Add(u.Outpoint);
+				}
 				else if (!utxo.input_mempool)
 					changes.Unconfirmed.UTXOs.Add(u);
-				if (utxo.input_mempool && !utxo.mempool)
-					changes.Unconfirmed.SpentOutpoints.Add(u.Outpoint);
+				else // (utxo.mempool && utxo.input_mempool)
+					changes.SpentUnconfirmed.Add(u);
 			}
 			return Json(changes, network.JsonSerializerSettings);
 		}
 
-		public Task<IActionResult> GetUTXOs(string cryptoCode, DerivationStrategyBase derivationStrategy)
+
+		[HttpPost("metadata/{key}")]
+		[HttpPost($"~/v1/{CommonRoutes.GroupEndpoint}/metadata/{{key}}")]
+		public async Task<IActionResult> SetMetadata(TrackedSourceContext trackedSourceContext, string key, [FromBody] JToken value = null)
 		{
-			return this.GetUTXOs(cryptoCode, derivationStrategy, null);
+			await trackedSourceContext.Repository.SaveMetadata(trackedSourceContext.TrackedSource, key, value);
+			return Ok();
+		}
+
+		[HttpGet("metadata/{key}")]
+		[HttpGet($"~/v1/{CommonRoutes.GroupEndpoint}/metadata/{{key}}")]
+		public async Task<IActionResult> GetMetadata(TrackedSourceContext trackedSourceContext, string key)
+		{
+			var result = await trackedSourceContext.Repository.GetMetadata<JToken>(trackedSourceContext.TrackedSource, key);
+			return result == null ? NotFound() : Json(result, trackedSourceContext.Repository.Serializer.Settings);
 		}
 	}
 }

@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace NBXplorer.Models
 {
@@ -28,6 +26,13 @@ namespace NBXplorer.Models
 			Code = code;
 			Message = message;
 		}
+		public NBXplorerError(int httpCode, string code, string message, string reason)
+		{
+			HttpCode = httpCode;
+			Code = code;
+			Message = message;
+			Reason = reason;
+		}
 		public int HttpCode
 		{
 			get; set;
@@ -37,6 +42,10 @@ namespace NBXplorer.Models
 			get; set;
 		}
 		public string Message
+		{
+			get; set;
+		}
+		public string Reason
 		{
 			get; set;
 		}

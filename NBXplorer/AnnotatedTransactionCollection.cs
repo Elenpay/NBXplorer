@@ -1,20 +1,11 @@
 ﻿using NBitcoin;
-using Microsoft.Extensions.Logging;
-using NBXplorer.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 using NBXplorer.Models;
 
 namespace NBXplorer
 {
-	public enum AnnotatedTransactionType
-	{
-		Confirmed,
-		Unconfirmed,
-		Orphan
-	}
 	public class AnnotatedTransaction
 	{
 		public AnnotatedTransaction(long? height, TrackedTransaction record, bool isMature)
@@ -48,13 +39,6 @@ namespace NBXplorer
 		{
 			_TxById = new Dictionary<uint256, AnnotatedTransaction>(transactions.Count);
 			ConfirmedTransactions = new List<AnnotatedTransaction>(transactions.Count);
-			foreach (var tx in transactions)
-			{
-				foreach (var keyPathInfo in tx.KnownKeyPathMapping)
-				{
-					_KeyPaths.TryAdd(keyPathInfo.Key, keyPathInfo.Value);
-				}
-			}
 
 			// Let's remove the dups and let's get the current height of the transactions
 			foreach (var trackedTx in transactions)
@@ -91,7 +75,7 @@ namespace NBXplorer
 					// No way to have double spent in confirmed transactions
 					try
 					{
-						spentBy.Add(spent, annotatedTransaction.Record.TransactionHash);
+						spentBy.Add(spent.Outpoint, annotatedTransaction.Record.TransactionHash);
 					}
 					catch
 					{
@@ -107,7 +91,7 @@ namespace NBXplorer
 			HashSet<uint256> toRemove = new HashSet<uint256>();
 			foreach (var annotatedTransaction in unconfs.Values)
 			{
-				foreach (var spent in annotatedTransaction.Record.SpentOutpoints)
+				foreach (var spent in annotatedTransaction.Record.SpentOutpoints.Select(o => o.Outpoint))
 				{
 					// All children of a replaced transaction should be replaced
 					if (replaced.TryGetValue(spent.Hash, out var parent) && parent.ReplacedBy is uint256)
@@ -223,7 +207,7 @@ namespace NBXplorer
 						// but we don't want user cancelling a chain of transaction
 						foreach (var parentOutpoint in tx.Record.SpentOutpoints)
 						{
-							if (_TxById.TryGetValue(parentOutpoint.Hash, out var parent) && parent.Height is null)
+							if (_TxById.TryGetValue(parentOutpoint.Outpoint.Hash, out var parent) && parent.Height is null)
 							{
 								parent.Replaceable = false;
 							}
@@ -268,21 +252,6 @@ namespace NBXplorer
 					return annotatedTransaction.Height < conflicted.Height; // The most buried block win (should never happen though)
 				}
 			}
-		}
-
-		public MatchedOutput GetUTXO(OutPoint outpoint)
-		{
-			if (_TxById.TryGetValue(outpoint.Hash, out var tx))
-			{
-				return tx.Record.GetReceivedOutputs().Where(c => c.Index == outpoint.N).FirstOrDefault();
-			}
-			return null;
-		}
-
-		Dictionary<Script, KeyPath> _KeyPaths = new Dictionary<Script, KeyPath>();
-		public KeyPath GetKeyPath(Script scriptPubkey)
-		{
-			return _KeyPaths.TryGet(scriptPubkey);
 		}
 
 		Dictionary<uint256, AnnotatedTransaction> _TxById = new Dictionary<uint256, AnnotatedTransaction>();

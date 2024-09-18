@@ -1,11 +1,7 @@
 ﻿using NBitcoin;
 using System.Linq;
-using NBitcoin.Protocol;
 using System;
 using System.Collections.Generic;
-using System.Text;
-using NBitcoin.Crypto;
-using System.IO;
 using Newtonsoft.Json;
 using NBXplorer.DerivationStrategy;
 
@@ -46,6 +42,11 @@ namespace NBXplorer.Models
 			}
 		}
 
+		public List<UTXO> SpentUnconfirmed
+		{
+			get;
+			set;
+		} = new List<UTXO>();
 
 		UTXOChange _Confirmed = new UTXOChange();
 		public UTXOChange Confirmed

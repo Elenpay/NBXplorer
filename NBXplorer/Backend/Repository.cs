@@ -1,6 +1,5 @@
 ﻿using NBitcoin;
 using Dapper;
-using NBitcoin.Altcoins;
 using NBXplorer.Configuration;
 using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
@@ -9,128 +8,28 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using NBitcoin.DataEncoders;
 using System.Data.Common;
-using NBXplorer.Logging;
-using Microsoft.Extensions.Logging;
-using Npgsql;
 using NBitcoin.RPC;
-using System.Text;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Linq;
-using NBitcoin.Crypto;
 using NBitcoin.Altcoins.Elements;
 using NBXplorer.Altcoins.Liquid;
 using NBXplorer.Client;
 using NBitcoin.Scripting;
 using System.Text.RegularExpressions;
+using Npgsql;
+using static NBXplorer.Backend.DbConnectionHelper;
 
-namespace NBXplorer.Backends.Postgres
+
+namespace NBXplorer.Backend
 {
-	public class PostgresRepositoryProvider : IRepositoryProvider
-	{
-		Dictionary<string, PostgresRepository> _Repositories = new Dictionary<string, PostgresRepository>();
-		ExplorerConfiguration _Configuration;
-
-		public Task StartCompletion => Task.CompletedTask;
-
-		public NBXplorerNetworkProvider Networks { get; }
-		public DbConnectionFactory ConnectionFactory { get; }
-		public KeyPathTemplates KeyPathTemplates { get; }
-
-		public PostgresRepositoryProvider(NBXplorerNetworkProvider networks,
-			ExplorerConfiguration configuration,
-			DbConnectionFactory connectionFactory,
-			KeyPathTemplates keyPathTemplates)
-		{
-			Networks = networks;
-			_Configuration = configuration;
-			ConnectionFactory = connectionFactory;
-			KeyPathTemplates = keyPathTemplates;
-		}
-
-		public IRepository GetRepository(string cryptoCode)
-		{
-			_Repositories.TryGetValue(cryptoCode.ToUpperInvariant(), out PostgresRepository repository);
-			return repository;
-		}
-		public IRepository GetRepository(NBXplorerNetwork network)
-		{
-			return GetRepository(network.CryptoCode);
-		}
-
-		public async Task StartAsync(CancellationToken cancellationToken)
-		{
-			foreach (var net in Networks.GetAll())
-			{
-				var settings = GetChainSetting(net);
-				if (settings != null)
-				{
-					var repo = new PostgresRepository(ConnectionFactory, net, KeyPathTemplates, settings.RPC, _Configuration);
-					repo.MaxPoolSize = _Configuration.MaxGapSize;
-					repo.MinPoolSize = _Configuration.MinGapSize;
-					repo.MinUtxoValue = settings.MinUtxoValue;
-					_Repositories.Add(net.CryptoCode, repo);
-				}
-			}
-			foreach (var repo in _Repositories.Select(kv => kv.Value))
-			{
-				if (GetChainSetting(repo.Network) is ChainConfiguration chainConf &&
-				chainConf.Rescan &&
-				(chainConf.RescanIfTimeBefore is null || chainConf.RescanIfTimeBefore.Value >= DateTimeOffset.UtcNow))
-				{
-					Logs.Configuration.LogInformation($"{repo.Network.CryptoCode}: Rescanning the chain...");
-					await repo.SetIndexProgress(null);
-				}
-			}
-			if (_Configuration.TrimEvents > 0)
-			{
-				Logs.Explorer.LogInformation("Trimming the event table if needed...");
-				int trimmed = 0;
-				foreach (var repo in _Repositories.Select(kv => kv.Value))
-				{
-					if (GetChainSetting(repo.Network) is ChainConfiguration chainConf)
-					{
-						trimmed += await repo.TrimmingEvents(_Configuration.TrimEvents, cancellationToken);
-					}
-				}
-				if (trimmed != 0)
-					Logs.Explorer.LogInformation($"Trimmed {trimmed} events in total...");
-			}
-		}
-
-		public async Task<string> GetMigrationId()
-		{
-			await using var conn = await ConnectionFactory.CreateConnection();
-			var v = await conn.ExecuteScalarAsync<string>("SELECT data_json FROM nbxv1_settings WHERE code='' AND key='MigrationId'");
-			return v is null ? null : v[1..^1];
-		}
-		public async Task SetMigrationId(uint256 newId)
-		{
-			await using var conn = await ConnectionFactory.CreateConnection();
-			await conn.ExecuteScalarAsync<string>(
-				"INSERT INTO nbxv1_settings AS ns (code, key, data_json) VALUES ('', 'MigrationId', @data::JSONB) " +
-				"RETURNING data_json", new { data = $"\"{newId}\"" });
-		}
-
-		private ChainConfiguration GetChainSetting(NBXplorerNetwork net)
-		{
-			return _Configuration.ChainConfigurations.FirstOrDefault(c => c.CryptoCode == net.CryptoCode);
-		}
-
-		public Task StopAsync(CancellationToken cancellationToken)
-		{
-			return Task.CompletedTask;
-		}
-	}
-	public class PostgresRepository : IRepository
+	public class Repository
 	{
 		private DbConnectionFactory connectionFactory;
 		private readonly RPCClient rpc;
 
 		public DbConnectionFactory ConnectionFactory => connectionFactory;
-		public PostgresRepository(DbConnectionFactory connectionFactory, NBXplorerNetwork network, KeyPathTemplates keyPathTemplates, RPCClient rpc, ExplorerConfiguration conf)
+		public Repository(DbConnectionFactory connectionFactory, NBXplorerNetwork network, KeyPathTemplates keyPathTemplates, RPCClient rpc, ExplorerConfiguration conf)
 		{
 			this.connectionFactory = connectionFactory;
 			Network = network;
@@ -186,11 +85,6 @@ namespace NBXplorer.Backends.Postgres
 			return new TrackedTransaction(transactionKey, trackedSource, tx, knownScriptMapping);
 		}
 
-		public ValueTask<int> DefragmentTables(CancellationToken cancellationToken = default)
-		{
-			return default;
-		}
-
 		public record DescriptorKey(string code, string descriptor);
 		internal DescriptorKey GetDescriptorKey(DerivationStrategyBase strategy, DerivationFeature derivationFeature)
 		{
@@ -199,38 +93,80 @@ namespace NBXplorer.Backends.Postgres
 		}
 		// metadata isn't really part of the key, but it's handy to have it here when we do INSERT INTO wallets.
 		public record WalletKey(string wid, string metadata);
-		internal WalletKey GetWalletKey(DerivationStrategyBase strategy)
+		internal static WalletKey GetWalletKey(DerivationStrategyBase strategy, NBXplorerNetwork network)
 		{
-			var hash = DBUtils.nbxv1_get_wallet_id(Network.CryptoCode, strategy.ToString());
+			var hash = DBUtils.nbxv1_get_wallet_id(network.CryptoCode, strategy.ToString());
 			JObject m = new JObject();
 			m.Add(new JProperty("type", new JValue("NBXv1-Derivation")));
-			m.Add(new JProperty("code", new JValue(Network.CryptoCode)));
+			m.Add(new JProperty("code", new JValue(network.CryptoCode)));
 			m.Add(new JProperty("derivation", new JValue(strategy.ToString())));
 			return new WalletKey(hash, m.ToString(Formatting.None));
 		}
-
-		WalletKey GetWalletKey(IDestination destination)
+		internal static WalletKey GetWalletKey(GroupTrackedSource groupTrackedSource)
 		{
-			var address = destination.ScriptPubKey.GetDestinationAddress(Network.NBitcoinNetwork);
-			var hash = DBUtils.nbxv1_get_wallet_id(Network.CryptoCode, address.ToString());
+			var m = new JObject { new JProperty("type", new JValue("NBXv1-Group")) };
+			var res = new WalletKey($"G:" + groupTrackedSource.GroupId, m.ToString(Formatting.None));
+			return res;
+		}
+		internal static WalletKey GetWalletKey(IDestination destination, NBXplorerNetwork network)
+		{
+			var address = destination.ScriptPubKey.GetDestinationAddress(network.NBitcoinNetwork);
+			var hash = DBUtils.nbxv1_get_wallet_id(network.CryptoCode, address.ToString());
 			JObject m = new JObject();
 			m.Add(new JProperty("type", new JValue("NBXv1-Address")));
-			m.Add(new JProperty("code", new JValue(Network.CryptoCode)));
+			m.Add(new JProperty("code", new JValue(network.CryptoCode)));
 			m.Add(new JProperty("address", new JValue(address.ToString())));
 			return new WalletKey(hash, m.ToString(Formatting.None));
 		}
-		internal WalletKey GetWalletKey(TrackedSource source)
+
+		internal WalletKey GetWalletKey(TrackedSource source) => GetWalletKey(source, Network);
+		internal static WalletKey GetWalletKey(TrackedSource source, NBXplorerNetwork network)
 		{
 			if (source is null)
 				throw new ArgumentNullException(nameof(source));
 			return source switch
 			{
-				DerivationSchemeTrackedSource derivation => GetWalletKey(derivation.DerivationStrategy),
-				AddressTrackedSource addr => GetWalletKey(addr.Address),
+				DerivationSchemeTrackedSource derivation => GetWalletKey(derivation.DerivationStrategy, network),
+				AddressTrackedSource addr => GetWalletKey(addr.Address, network),
+				GroupTrackedSource group => GetWalletKey(group),
 				_ => throw new NotSupportedException(source.GetType().ToString())
 			};
 		}
 
+		internal TrackedSource TryGetTrackedSource(WalletKey walletKey)
+		{
+			return TryGetTrackedSource(walletKey, Network);
+		}
+		internal static TrackedSource TryGetTrackedSource(WalletKey walletKey, NBXplorerNetwork network)
+		{
+			var metadata = JObject.Parse(walletKey.metadata);
+			if (metadata.TryGetValue("type", StringComparison.OrdinalIgnoreCase, out JToken typeJToken) &&
+				typeJToken.Value<string>() is { } type)
+			{
+				if ((metadata.TryGetValue("code", StringComparison.OrdinalIgnoreCase, out JToken codeJToken) &&
+					 codeJToken.Value<string>() is { } code) && !code.Equals(network.CryptoCode,
+						StringComparison.InvariantCultureIgnoreCase))
+				{
+					return null;
+				}
+
+				switch (type)
+				{
+					case "NBXv1-Derivation":
+						var derivation = metadata["derivation"].Value<string>();
+						return new DerivationSchemeTrackedSource(network.DerivationStrategyFactory.Parse(derivation));
+					case "NBXv1-Address":
+						var address = metadata["address"].Value<string>();
+						return new AddressTrackedSource(BitcoinAddress.Create(address, network.NBitcoinNetwork));
+					case "NBXv1-Group":
+						return new GroupTrackedSource(walletKey.wid[2..]); // Skip "G:"
+				}
+			}
+
+			return null;
+		}
+
+		internal record ScriptInsert(string code, string wallet_id, string script, string addr, bool used);
 		internal record DescriptorScriptInsert(string descriptor, int idx, string script, string metadata, string addr, bool used);
 		public async Task<int> GenerateAddresses(DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query = null)
 		{
@@ -242,7 +178,7 @@ namespace NBXplorer.Backends.Postgres
 		internal async Task<int> GenerateAddressesCore(DbConnection connection, DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query)
 		{
 			var descriptorKey = GetDescriptorKey(strategy, derivationFeature);
-			var walletKey = GetWalletKey(strategy);
+			var walletKey = GetWalletKey(strategy, Network);
 			var gapNextIndex = await GetGapAndNextIdx(connection, descriptorKey);
 			long toGenerate = ToGenerateCount(query, gapNextIndex?.gap);
 			if (gapNextIndex is not null && toGenerate == 0)
@@ -298,7 +234,7 @@ namespace NBXplorer.Backends.Postgres
 
 				// We do not dispose on purpose.
 				await ImportDescriptorToRPCIfNeeded(connection, walletKey, nextIndex, toGenerate, keyTemplate);
-				foreach (var batch in linesScriptpubkeys.Batch(10_000))
+				foreach (var batch in linesScriptpubkeys.Chunk(10_000))
 				{
 					await InsertDescriptorsScripts(connection, batch);
 				}
@@ -364,10 +300,11 @@ namespace NBXplorer.Backends.Postgres
 							"WHERE code=@code AND descriptor=@descriptor", descriptorKey);
 		}
 
+		internal const string InsertScriptsScript = "INSERT INTO scripts (code, script, addr, used) SELECT @code code, script, addr, used FROM unnest(@records) ON CONFLICT DO NOTHING;";
 		private async Task InsertDescriptorsScripts(DbConnection connection, IList<DescriptorScriptInsert> batch)
 		{
 			await connection.ExecuteAsync(
-								"INSERT INTO scripts (code, script, addr, used) SELECT @code code, script, addr, used FROM unnest(@records) ON CONFLICT DO NOTHING;" +
+								InsertScriptsScript +
 								"INSERT INTO descriptors_scripts (code, descriptor, idx, script, metadata, used) SELECT @code code, descriptor, idx, script, metadata, used FROM unnest(@records) ON CONFLICT DO NOTHING;"
 								, new
 								{
@@ -451,37 +388,63 @@ namespace NBXplorer.Backends.Postgres
 			if (scripts.Count == 0)
 				return result;
 			string additionalColumn = Network.IsElement ? ", ts.blinded_addr" : "";
-			var rows = await connection.QueryAsync($"SELECT ts.script, ts.addr, ts.derivation, ts.keypath, ts.redeem {additionalColumn} FROM " +
-				"unnest(@records) AS r (script)," +
-				" LATERAL (" +
-				"	SELECT script, addr, descriptor_metadata->>'derivation' derivation, keypath, descriptors_scripts_metadata->>'redeem' redeem, descriptors_scripts_metadata->>'blindedAddress' blinded_addr " +
-				"	FROM nbxv1_keypath_info ki " +
-				"   WHERE ki.code=@code AND ki.script=r.script) ts;", new { code = Network.CryptoCode, records = scripts.Select(s => s.ToHex()).ToArray() });
+			var rows = await connection.QueryAsync($@"
+			    SELECT ts.code, ts.script, ts.addr, ts.derivation, ts.keypath, ts.redeem{additionalColumn},
+				       ts.wallet_id,
+				       w.metadata AS wallet_metadata
+				FROM unnest(@records) AS r (script),
+				LATERAL (
+				    SELECT code, script, wallet_id, addr, descriptor_metadata->>'derivation' derivation, 
+				           keypath, descriptors_scripts_metadata->>'redeem' redeem, 
+				           descriptors_scripts_metadata->>'blindedAddress' blinded_addr, 
+				           descriptors_scripts_metadata->>'blindingKey' blindingKey, 
+				           descriptor_metadata->>'descriptor' descriptor
+				    FROM nbxv1_keypath_info ki 
+				    WHERE ki.code=@code AND ki.script=r.script
+				) ts
+				JOIN wallets w USING(wallet_id)",
+	new { code = Network.CryptoCode, records = scripts.Select(s => s.ToHex()).ToArray() });
 			foreach (var r in rows)
 			{
 				// This might be the case for a derivation added by a different indexer
 				if (r.derivation is not null && r.keypath is null)
 					continue;
-				var addr = GetAddress(r);
+				BitcoinAddress addr = GetAddress(r);
 				bool isExplicit = r.derivation is null;
 				bool isDescriptor = !isExplicit;
 				var script = Script.FromHex(r.script);
-				var derivationStrategy = isDescriptor ? Network.DerivationStrategyFactory.Parse(r.derivation) : null;
-				var keypath = isDescriptor ? KeyPath.Parse(r.keypath) : null;
+				DerivationStrategyBase derivationStrategy = r.derivation is not null ? Network.DerivationStrategyFactory.Parse(r.derivation) : null;
+				var keypath = r.keypath is not null ? KeyPath.Parse(r.keypath) : null;
 				var redeem = (string)r.redeem;
-				result.Add(script, new KeyPathInformation()
-				{
-					Address = addr,
-					DerivationStrategy = isDescriptor ? derivationStrategy : null,
-					KeyPath = isDescriptor ? keypath : null,
-					ScriptPubKey = script,
-					TrackedSource = isDescriptor && derivationStrategy is not null ? new DerivationSchemeTrackedSource(derivationStrategy) :
-									isExplicit ? new AddressTrackedSource(addr) : null,
-					Feature = keypath is null ? DerivationFeature.Deposit : KeyPathTemplates.GetDerivationFeature(keypath),
-					Redeem = redeem is null ? null : Script.FromHex(redeem)
-				});
+				string walletMetadata = r.wallet_metadata;
+				string wid = r.wallet_id;
+				if (wid is null || walletMetadata is null)
+					continue;
+				var walletKey = new WalletKey(wid, walletMetadata);
+				var trackedSource = TryGetTrackedSource(walletKey);
+				if (trackedSource is null)
+					continue;
+				var ki = Network.IsElement && r.blindingKey is not null
+					? new LiquidKeyPathInformation()
+					{
+						BlindingKey = Key.Parse(r.blindingKey, Network.NBitcoinNetwork)
+					}
+					: new KeyPathInformation();
+				ki.Address = addr;
+				ki.DerivationStrategy = r.derivation is not null ? derivationStrategy : null;
+				ki.KeyPath = keypath;
+				ki.ScriptPubKey = script;
+				ki.TrackedSource = trackedSource;
+				ki.Feature = keypath is null ? DerivationFeature.Deposit : KeyPathTemplates.GetDerivationFeature(keypath);
+				ki.Redeem = redeem is null ? null : Script.FromHex(redeem);
+				result.Add(script, ki);
 			}
 			return result;
+		}
+
+		public class LiquidKeyPathInformation : KeyPathInformation
+		{
+			public Key BlindingKey { get; set; }
 		}
 
 		private BitcoinAddress GetAddress(dynamic r)
@@ -492,14 +455,6 @@ namespace NBXplorer.Backends.Postgres
 				return BitcoinAddress.Create(r.blinded_addr, Network.NBitcoinNetwork);
 			}
 			return BitcoinAddress.Create(r.addr, Network.NBitcoinNetwork);
-		}
-
-		internal LegacyDescriptorMetadata GetDescriptorMetadata(string str)
-		{
-			var o = JObject.Parse(str);
-			if (o["type"].Value<string>() != LegacyDescriptorMetadata.TypeName)
-				return null;
-			return this.Serializer.ToObject<LegacyDescriptorMetadata>(o);
 		}
 
 		FixedSizeCache<uint256, uint256> noMatchCache = new FixedSizeCache<uint256, uint256>(5000, k => k);
@@ -589,8 +544,26 @@ namespace NBXplorer.Backends.Postgres
 		record UpdateMatchesOuts(string tx_id, long idx, string asset_id, long value);
 		async Task<TrackedTransaction[]> GetMatches(DbConnectionHelper connection, IList<Transaction> txs, SlimChainedBlock slimBlock, DateTimeOffset now, bool useCache, bool immediateSave)
 		{
+			var blockIndexes = slimBlock is null ? null : new Dictionary<uint256, int>(txs.Count);
+			SaveTransactionRecord CreateTransactionRecord(Transaction tx) => SaveTransactionRecord.Create(
+				slimBlock,
+				tx,
+				blockIndexes?.TryGetValue(tx.GetHash(), out var bi) is true ? bi : null,
+				now);
+			int i = 0;
+			var unconfTxs = slimBlock is null ? null : await connection.GetUnconfirmedTxs();
+			List<SaveTransactionRecord> txRecords = new();
 			foreach (var tx in txs)
+			{
 				tx.PrecomputeHash(false, true);
+				blockIndexes?.Add(tx.GetHash(), i);
+				i++;
+				if (unconfTxs?.Contains(tx.GetHash()) is true)
+					// If a block has been found, and we have some unconf transactions
+					// then we want to add an entry in blks_txs, even if the unconf tx isn't matching
+					// any wallet. So we add record.
+					txRecords.Add(CreateTransactionRecord(tx));
+			}
 
 			var outputCount = txs.Select(tx => tx.Outputs.Count).Sum();
 			var inputCount = txs.Select(tx => tx.Inputs.Count).Sum();
@@ -599,10 +572,11 @@ namespace NBXplorer.Backends.Postgres
 			var scripts = new List<Script>(outpointCount);
 			var transactionsPerScript = new MultiValueDictionary<Script, NBitcoin.Transaction>(outpointCount);
 
-			var matches = new Dictionary<string, TrackedTransaction>();
+			var matches = new Dictionary<(TrackedSource TrackedSource, uint256 TxId), TrackedTransaction>();
 			var noMatchTransactions = slimBlock?.Hash is null ? new HashSet<uint256>(txs.Count) : null;
 			var transactions = new Dictionary<uint256, NBitcoin.Transaction>(txs.Count);
 			var outpoints = new List<OutPoint>(inputCount);
+			var elementContext = Network.IsElement ? new ElementMatchContext() : null;
 
 			foreach (var tx in txs)
 			{
@@ -614,7 +588,6 @@ namespace NBXplorer.Backends.Postgres
 					continue;
 				noMatchTransactions?.Add(tx.GetHash());
 			}
-
 			if (!await connection.FetchMatches(transactions.Values, slimBlock, MinUtxoValue))
 				goto end;
 
@@ -622,12 +595,19 @@ namespace NBXplorer.Backends.Postgres
 				"SELECT * FROM matched_outs;" +
 				"SELECT * FROM matched_ins;" +
 				// the query matched_conflicts need to fetch wallet_id as we don't want replacing include transaction that aren't owned by the wallet
+				// note there might be some dups as one matched_conflicts can match more than one tracked_txs line.
+				// but that's ok.
 				"SELECT tt.wallet_id, mc.* FROM matched_conflicts mc JOIN nbxv1_tracked_txs tt ON tt.code=mc.code AND tt.tx_id=mc.replaced_tx_id"))
 			{
 				var matchedOuts = await result.ReadAsync();
 				var matchedIns = await result.ReadAsync();
 				var matchedConflicts = await result.ReadAsync();
-				var elementContext = Network.IsElement ? new ElementMatchContext() : null;
+				foreach (var r in matchedConflicts)
+				{
+					var txId = uint256.Parse(r.replacing_tx_id);
+					var tx = transactions[txId];
+					txRecords.Add(CreateTransactionRecord(tx));
+				}
 				foreach (var r in matchedOuts)
 				{
 					var s = Script.FromHex(r.script);
@@ -635,12 +615,26 @@ namespace NBXplorer.Backends.Postgres
 					transactionsPerScript.Add(s, transactions[uint256.Parse(r.tx_id)]);
 					elementContext?.MatchedOut(r);
 				}
+
+				var matchedInputs = new MultiValueDictionary<uint256, MatchedInput>();
 				foreach (var r in matchedIns)
 				{
-					var s = Script.FromHex(r.script);
+					Script s = Script.FromHex(r.script);
 					scripts.Add(s);
-					transactionsPerScript.Add(s, transactions[uint256.Parse(r.tx_id)]);
+					var txId = uint256.Parse(r.tx_id);
+					transactionsPerScript.Add(s, transactions[txId]);
+
+					matchedInputs.Add(txId,	
+					new MatchedInput()
+					{
+						InputIndex = (int)r.idx,
+						Index = (int)r.spent_idx,
+						ScriptPubKey = s,
+						TransactionId = uint256.Parse(r.spent_tx_id),
+						Value = Money.Satoshis(r.value)
+					});
 				}
+
 				if (scripts.Count > 0)
 				{
 					var keyInformations = await GetKeyInformations(connection.Connection, scripts);
@@ -648,22 +642,27 @@ namespace NBXplorer.Backends.Postgres
 					{
 						foreach (var tx in transactionsPerScript[keyInfoByScripts.Key])
 						{
+							var txId = tx.GetHash();
 							if (keyInfoByScripts.Value.Count != 0)
-								noMatchTransactions?.Remove(tx.GetHash());
+								noMatchTransactions?.Remove(txId);
 							foreach (var keyInfo in keyInfoByScripts.Value)
 							{
-								var matchesGroupingKey = $"{keyInfo.DerivationStrategy?.ToString() ?? keyInfo.ScriptPubKey.ToHex()}-[{tx.GetHash()}]";
+								var matchesGroupingKey = (keyInfo.TrackedSource, txId);
 								if (!matches.TryGetValue(matchesGroupingKey, out TrackedTransaction match))
 								{
 									match = CreateTrackedTransaction(keyInfo.TrackedSource,
-										new TrackedTransactionKey(tx.GetHash(), slimBlock?.Hash, false),
+										new TrackedTransactionKey(txId, slimBlock?.Hash, false),
 										tx,
 										new Dictionary<Script, KeyPath>());
-									match.BlockHeight = slimBlock?.Height;
+
+									var record = CreateTransactionRecord(tx);
+									match.BlockHeight = record.BlockHeight;
 									match.FirstSeen = now;
+									match.BlockIndex = record.BlockIndex;
 									match.Inserted = now;
-									match.Immature = tx.IsCoinBase;
+									match.Immature = record.Immature;
 									match.Replacing = new HashSet<uint256>();
+
 									foreach (var r in matchedConflicts)
 									{
 										var wallet_id = GetWalletKey(match.TrackedSource).wid;
@@ -675,6 +674,7 @@ namespace NBXplorer.Backends.Postgres
 										}
 									}
 									matches.Add(matchesGroupingKey, match);
+									txRecords.Add(record);
 								}
 								match.AddKnownKeyPathInformation(keyInfo);
 								elementContext?.TrackedTransaction(match, keyInfo);
@@ -683,21 +683,33 @@ namespace NBXplorer.Backends.Postgres
 					}
 					foreach (var m in matches.Values)
 					{
-						m.KnownKeyPathMappingUpdated();
+						m.UpdateMatchedInputs(matchedInputs
+											.GetOrEmpty(m.TransactionHash)
+											.Where(mi => m.OwnedScripts.Contains(mi.ScriptPubKey)));
+						m.OwnedScriptsUpdated();
 						if (elementContext is not null)
 							await elementContext.Unblind(rpc, m);
 					}
 				}
-
-				if (immediateSave && matches.Values.Count != 0)
-				{
-					await SetTxs(connection, matches.Values);
-					if (elementContext is not null)
-						await elementContext.UpdateMatchedOuts(connection.Connection);
-					await connection.Connection.ExecuteAsync("CALL save_matches(@code)", new { code = Network.CryptoCode });
-				}
 			}
 			end:
+			if (immediateSave && txRecords.Count != 0)
+			{
+				await connection.SaveTransactions(txRecords);
+				if (elementContext is not null)
+					await elementContext.UpdateMatchedOuts(connection.Connection);
+				retry:
+				try
+				{
+					await connection.Connection.ExecuteAsync("CALL save_matches(@code)", new { code = Network.CryptoCode });
+				}
+				// Broadcast call this method, and it may be called at same time as the indexer, resulting in a Deadlock
+				// I believe we can safely retry in that case.
+				catch (NpgsqlException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected)
+				{
+					goto retry;
+				}
+			}
 			if (noMatchTransactions != null)
 			{
 				foreach (var txId in noMatchTransactions)
@@ -711,12 +723,6 @@ namespace NBXplorer.Backends.Postgres
 		public Task<TrackedTransaction[]> GetMatches(Transaction tx, SlimChainedBlock slimBlock, DateTimeOffset now, bool useCache)
 		{
 			return GetMatches(new[] { tx }, slimBlock, now, useCache);
-		}
-
-		public async Task<Dictionary<OutPoint, TxOut>> GetOutPointToTxOut(IList<OutPoint> outPoints)
-		{
-			await using var connection = await connectionFactory.CreateConnectionHelper(Network);
-			return await connection.GetOutputs(outPoints);
 		}
 
 		record SavedTransactionRow(byte[] raw, string blk_id, long? blk_height, string replaced_by, DateTime seen_at);
@@ -742,9 +748,9 @@ namespace NBXplorer.Backends.Postgres
 			var tip = await connection.GetTip();
 			var txIdCond = txId is null ? string.Empty : " AND tx_id=@tx_id";
 			var utxos = await
-				connection.Connection.QueryAsync<(string tx_id, long idx, string blk_id, long? blk_height, int? blk_idx, bool is_out, string spent_tx_id, long spent_idx, string script, long value, string asset_id, bool immature, string keypath, DateTime seen_at)>(
-				"SELECT tx_id, idx, blk_id, blk_height, blk_idx, is_out, spent_tx_id, spent_idx, script, value, asset_id, immature, keypath, seen_at " +
-				"FROM nbxv1_tracked_txs " +
+				connection.Connection.QueryAsync<(string tx_id, long idx, string blk_id, long? blk_height, int? blk_idx, bool is_out, string spent_tx_id, long spent_idx, string script, string addr, long value, string asset_id, bool immature, string keypath, DateTime seen_at)>(
+				"SELECT tx_id, idx, blk_id, blk_height, blk_idx, is_out, spent_tx_id, spent_idx, script, s.addr, value, asset_id, immature, keypath, seen_at " +
+				"FROM nbxv1_tracked_txs LEFT JOIN scripts s USING (code, script) " +
 				$"WHERE code=@code AND wallet_id=@walletId{txIdCond}", new { code = Network.CryptoCode, walletId = GetWalletKey(trackedSource).wid, tx_id = txId?.ToString() });
 			utxos.TryGetNonEnumeratedCount(out int c);
 			var trackedById = new Dictionary<string, TrackedTransaction>(c);
@@ -755,6 +761,7 @@ namespace NBXplorer.Backends.Postgres
 				{
 					var txout = Network.NBitcoinNetwork.Consensus.ConsensusFactory.CreateTxOut();
 					txout.ScriptPubKey = Script.FromHex(utxo.script);
+					tracked.KnownAddresses.TryAdd(txout.ScriptPubKey, BitcoinAddress.Create(utxo.addr, this.Network.NBitcoinNetwork));
 					txout.Value = Money.Satoshis(utxo.value);
 					var coin = new Coin(new OutPoint(tracked.Key.TxId, (uint)utxo.idx), txout);
 					if (Network.IsElement)
@@ -765,15 +772,26 @@ namespace NBXplorer.Backends.Postgres
 					{
 						tracked.ReceivedCoins.Add(coin);
 					}
+
 					// TODO: IsCoinBase is actually not used anywhere.
 					tracked.IsCoinBase = utxo.immature;
 					tracked.Immature = utxo.immature;
 					if (utxo.keypath is string)
 						tracked.KnownKeyPathMapping.TryAdd(txout.ScriptPubKey, KeyPath.Parse(utxo.keypath));
+					tracked.OwnedScripts.Add(txout.ScriptPubKey);
 				}
 				else
 				{
-					tracked.SpentOutpoints.Add(new OutPoint(uint256.Parse(utxo.spent_tx_id), (uint)utxo.spent_idx));
+					tracked.SpentOutpoints.Add(new OutPoint(uint256.Parse(utxo.spent_tx_id), (uint)utxo.spent_idx), (int)utxo.idx);
+					tracked.MatchedInputs.Add(new MatchedInput()
+					{
+						InputIndex = (int)utxo.idx,
+						Index = (int)utxo.spent_idx,
+						TransactionId = uint256.Parse(utxo.spent_tx_id),
+						Address = utxo.addr is null ? null : BitcoinAddress.Create(utxo.addr, Network.NBitcoinNetwork),
+						ScriptPubKey = Script.FromHex(utxo.script),
+						Value = Money.Satoshis(utxo.value)
+					});
 				}
 			}
 
@@ -792,12 +810,12 @@ namespace NBXplorer.Backends.Postgres
 				tracked.Transaction = Transaction.Load(row.raw, Network.NBitcoinNetwork);
 				tracked.Key = new TrackedTransactionKey(tracked.Key.TxId, tracked.Key.BlockHash, false);
 				if (tracked.BlockHash is null) // Only need the spend outpoint for double spend detection on unconf txs
-					tracked.SpentOutpoints.AddRange(tracked.Transaction.Inputs.Select(o => o.PrevOut));
+					tracked.SpentOutpoints.AddInputs(tracked.Transaction);
 			}
 
 			return trackedById.Values.Select(c =>
 			{
-				c.KnownKeyPathMappingUpdated();
+				c.OwnedScriptsUpdated();
 				return c;
 			}).ToArray();
 		}
@@ -892,7 +910,7 @@ namespace NBXplorer.Backends.Postgres
 								ki.KeyPath,
 								derivation,
 								addr);
-				}				
+				}
 
 				var wid = GetWalletKey(ki.TrackedSource).wid;
 				if (descriptorKey is not null)
@@ -925,11 +943,14 @@ namespace NBXplorer.Backends.Postgres
 					"INSERT INTO scripts VALUES (@code, @script, @address) ON CONFLICT DO NOTHING;" +
 					"INSERT INTO wallets_scripts VALUES (@code, @script, @walletid) ON CONFLICT DO NOTHING;", inserts);
 		}
-
+		private async Task<ImportRPCMode> GetImportRPCMode(DbConnectionHelper connection, WalletKey walletKey)
+		{
+			return ImportRPCMode.Parse((await connection.GetMetadata<string>(walletKey.wid, WellknownMetadataKeys.ImportAddressToRPC)));
+		}
 		private async Task ImportAddressToRPC(DbConnectionHelper connection, TrackedSource trackedSource, BitcoinAddress address, KeyPath keyPath)
 		{
 			var k = GetWalletKey(trackedSource);
-			var shouldImportRPC = ImportRPCMode.Parse((await connection.GetMetadata<string>(k.wid, WellknownMetadataKeys.ImportAddressToRPC)));
+			var shouldImportRPC = await GetImportRPCMode(connection, k);
 			if (shouldImportRPC != ImportRPCMode.Legacy)
 				return;
 			var accountKey = await connection.GetMetadata<BitcoinExtKey>(k.wid, WellknownMetadataKeys.AccountHDKey);
@@ -952,22 +973,7 @@ namespace NBXplorer.Backends.Postgres
 				}
 			}
 		}
-#if SUPPORT_DBTRIE
-		public ValueTask<bool> MigrateOutPoints(string directory, CancellationToken cancellationToken = default)
-		{
-			return default;
-		}
-
-		public ValueTask<int> MigrateSavedTransactions(CancellationToken cancellationToken = default)
-		{
-			return default;
-		}
-#endif
-		public Task Ping()
-		{
-			return Task.CompletedTask;
-		}
-		public async Task Prune(TrackedSource trackedSource, IEnumerable<TrackedTransaction> prunable)
+		public async Task Prune(IEnumerable<TrackedTransaction> prunable)
 		{
 			if (prunable.TryGetNonEnumeratedCount(out var c) && c == 0)
 				return;
@@ -985,7 +991,7 @@ namespace NBXplorer.Backends.Postgres
 			var spentCoins =
 				prunable
 				.Where(p => p.BlockHash is not null)
-				.SelectMany(c => c.SpentOutpoints)
+				.SelectMany(c => c.SpentOutpoints.Select(c => c.Outpoint))
 				.Select(c => new
 				{
 					code = Network.CryptoCode,
@@ -1057,9 +1063,9 @@ namespace NBXplorer.Backends.Postgres
 					{
 						ins.Add(new DbConnectionHelper.NewIn(
 							tx.TransactionHash,
-							tx.IndexOfInput(input),
-							input.Hash,
-							(int)input.N
+							input.InputIndex,
+							input.Outpoint.Hash,
+							(int)input.Outpoint.N
 							));
 					}
 				}
@@ -1075,13 +1081,8 @@ namespace NBXplorer.Backends.Postgres
 				}
 			}
 			await helper.FetchMatches(outs, ins);
-			await SetTxs(helper, transactions);
+			await helper.SaveTransactions(transactions.Select(SaveTransactionRecord.Create));
 			await helper.Connection.ExecuteAsync("CALL save_matches(@code)", new { code = Network.CryptoCode });
-		}
-
-		private static async Task SetTxs(DbConnectionHelper helper, IEnumerable<TrackedTransaction> transactions)
-		{
-			await helper.SaveTransactions(transactions.Select(t => (t.Transaction, t.TransactionHash, t.BlockHash, t.BlockIndex, t.BlockHeight, t.IsCoinBase, new DateTimeOffset?(t.FirstSeen))));
 		}
 
 		public async Task SaveMetadata<TMetadata>(TrackedSource source, string key, TMetadata value) where TMetadata : class
@@ -1105,7 +1106,7 @@ namespace NBXplorer.Backends.Postgres
 		public async Task<List<SavedTransaction>> SaveTransactions(DateTimeOffset now, Transaction[] transactions, SlimChainedBlock slimBlock)
 		{
 			await using var helper = await connectionFactory.CreateConnectionHelper(Network);
-			await helper.SaveTransactions(transactions.Select(t => (t, null as uint256, slimBlock?.Hash, null as int?, (long?)slimBlock?.Height, false, new DateTimeOffset?(now))));
+			await helper.SaveTransactions(transactions.Select(t => new SaveTransactionRecord(t, null as uint256, slimBlock?.Hash, null as int?, (long?)slimBlock?.Height, false, new DateTimeOffset?(now))));
 			return transactions.Select(t => new SavedTransaction()
 			{
 				BlockHash = slimBlock?.Hash,
@@ -1151,9 +1152,9 @@ namespace NBXplorer.Backends.Postgres
 		public async Task Track(IDestination address)
 		{
 			await using var conn = await GetConnection();
-			var walletKey = GetWalletKey(address);
+			var walletKey = GetWalletKey(address, Network);
 			await conn.Connection.ExecuteAsync(
-				"INSERT INTO wallets VALUES (@wid, @metadata::JSONB) ON CONFLICT DO NOTHING;" +
+				WalletInsertQuery +
 				"INSERT INTO scripts VALUES (@code, @script, @addr) ON CONFLICT DO NOTHING;" +
 				"INSERT INTO wallets_scripts VALUES (@code, @script, @wid) ON CONFLICT DO NOTHING"
 				, new { code = Network.CryptoCode, script = address.ScriptPubKey.ToHex(), addr = address.ScriptPubKey.GetDestinationAddress(Network.NBitcoinNetwork).ToString(), walletKey.wid, walletKey.metadata });
@@ -1161,10 +1162,11 @@ namespace NBXplorer.Backends.Postgres
 
 		public async ValueTask<int> TrimmingEvents(int maxEvents, CancellationToken cancellationToken = default)
 		{
-			await using var conn = await connectionFactory.CreateConnectionHelper(Network, o => o.CommandTimeout = Constants.FifteenMinutes);
-			var id = conn.Connection.ExecuteScalar<long?>("SELECT id FROM nbxv1_evts WHERE code=@code ORDER BY id DESC OFFSET @maxEvents LIMIT 1", new { code = Network.CryptoCode, maxEvents = maxEvents - 1 });
+			await using var ds = connectionFactory.CreateDataSourceBuilder(o => o.CommandTimeout = Constants.FifteenMinutes).Build();
+			await using var conn = await ds.ReliableOpenConnectionAsync();
+			var id = await conn.ExecuteScalarAsync<long?>("SELECT id FROM nbxv1_evts WHERE code=@code ORDER BY id DESC OFFSET @maxEvents LIMIT 1", new { code = Network.CryptoCode, maxEvents = maxEvents - 1 });
 			if (id is long i)
-				return await conn.Connection.ExecuteAsync("DELETE FROM nbxv1_evts WHERE code=@code AND id < @id", new { code = Network.CryptoCode, id = i });
+				return await conn.ExecuteAsync("DELETE FROM nbxv1_evts WHERE code=@code AND id < @id", new { code = Network.CryptoCode, id = i });
 			return 0;
 		}
 
@@ -1198,23 +1200,6 @@ namespace NBXplorer.Backends.Postgres
 
 			foreach (var p in highestKeyIndexFound.Where(k => k.Value is not null))
 				await GenerateAddresses(trackedSource.DerivationStrategy, p.Key);
-		}
-
-		public async Task NewBlock(SlimChainedBlock newTip)
-		{
-			await using var conn = await GetConnection();
-			await conn.NewBlock(newTip);
-		}
-
-		public async Task NewBlockCommit(uint256 blockHash)
-		{
-			await using var conn = await GetConnection();
-			await conn.Connection.ExecuteAsync("UPDATE blks SET confirmed='t' WHERE blk_id=@blk_id AND confirmed IS FALSE;",
-				new
-				{
-					code = Network.CryptoCode,
-					blk_id = blockHash.ToString()
-				});
 		}
 
 		public async Task<SlimChainedBlock> GetTip()
@@ -1257,21 +1242,21 @@ namespace NBXplorer.Backends.Postgres
 
 		public async Task EnsureWalletCreated(DerivationStrategyBase strategy)
 		{
-			using var connection = await ConnectionFactory.CreateConnection();
-			await connection.ExecuteAsync("INSERT INTO wallets VALUES (@wid, @metadata::JSONB) ON CONFLICT DO NOTHING", GetWalletKey(strategy));
+			await EnsureWalletCreated(GetWalletKey(strategy, Network));
 		}
-	}
 
-	public class LegacyDescriptorMetadata
-	{
-		public const string TypeName = "NBXv1-Derivation";
-		[JsonProperty]
-		public string Type { get; set; }
-		[JsonProperty]
-		public DerivationStrategyBase Derivation { get; set; }
-		[JsonProperty]
-		public KeyPathTemplate KeyPathTemplate { get; set; }
-		[JsonConverter(typeof(StringEnumConverter))]
-		public DerivationFeature Feature { get; set; }
+		public async Task EnsureWalletCreated(TrackedSource trackedSource)
+		{
+			await EnsureWalletCreated(GetWalletKey(trackedSource));
+		}
+
+		record WalletHierarchyInsert(string child, string parent);
+		public async Task EnsureWalletCreated(WalletKey walletKey)
+		{
+			await using var connection = await ConnectionFactory.CreateConnection();
+			await connection.ExecuteAsync(WalletInsertQuery, walletKey);
+		}
+
+		internal static readonly string WalletInsertQuery = "INSERT INTO wallets (wallet_id, metadata) VALUES (@wid, @metadata::JSONB) ON CONFLICT DO NOTHING;";
 	}
 }

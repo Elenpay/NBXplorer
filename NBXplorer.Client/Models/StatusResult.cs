@@ -1,8 +1,5 @@
 ﻿using NBitcoin;
 using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace NBXplorer.Models
 {
@@ -50,12 +47,6 @@ namespace NBXplorer.Models
 		public BitcoinStatus BitcoinStatus
 		{
 			get; set;
-		}
-		public string Backend { get; set; }
-		public double RepositoryPingTime
-		{
-			get;
-			set;
 		}
 		public bool IsFullySynched
 		{

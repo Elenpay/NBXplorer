@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Linq;
 using System.Collections.Generic;
-using System.Text;
 using NBitcoin;
 using NBXplorer.Models;
 
@@ -29,7 +28,7 @@ namespace NBXplorer.Tests
 				};
 				foreach (var input in _Inputs)
 				{
-					tx.SpentOutpoints.Add(input.Coin.Outpoint);
+					tx.SpentOutpoints.Add(input.Coin.Outpoint, 0);
 				}
 				foreach (var output in _Outputs)
 				{
