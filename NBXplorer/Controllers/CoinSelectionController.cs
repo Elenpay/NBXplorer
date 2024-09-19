@@ -2,28 +2,22 @@ using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using NBitcoin;
-using NBXplorer.Backends;
-using NBXplorer.Backends.Postgres;
 using NBXplorer.DerivationStrategy;
 using NBXplorer.ModelBinders;
 using NBXplorer.Models;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using NBXplorer.Backend;
 using NBXplorer.CoinSelection.SelectionStrategies;
 
 namespace NBXplorer.Controllers
 {
 	[Route("v1")]
 	[Authorize]
-	public class CoinSelectionController : ControllerBase
+	public class CoinSelectionController : Controller
 	{
-		public CoinSelectionController(
-			DbConnectionFactory connectionFactory,
-			NBXplorerNetworkProvider networkProvider,
-			IRPCClients rpcClients,
-			IIndexers indexers,
-			IRepositoryProvider repositoryProvider) : base(networkProvider, rpcClients, repositoryProvider, indexers)
+		public CoinSelectionController(DbConnectionFactory connectionFactory)
 		{
 			ConnectionFactory = connectionFactory;
 		}
@@ -33,6 +27,7 @@ namespace NBXplorer.Controllers
 		/// <summary>
 		/// Same as utxos endpoint but with a limit on the utxos
 		/// </summary>
+		/// <param name="trackedSourceContext"></param>
 		/// <param name="cryptoCode"></param>
 		/// <param name="derivationScheme"></param>
 		/// <param name="address"></param>
@@ -46,8 +41,8 @@ namespace NBXplorer.Controllers
 		[HttpGet]
 		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/selectutxos")]
 		[Route("cryptos/{cryptoCode}/addresses/{address}/selectutxos")]
-		[PostgresImplementationActionConstraint(true)]
 		public async Task<IActionResult> GetUTXOsByLimit(
+			TrackedSourceContext trackedSourceContext,
 			string cryptoCode,
 			[ModelBinder(BinderType = typeof(DerivationStrategyModelBinder))]
 			DerivationStrategyBase derivationScheme,
@@ -60,11 +55,9 @@ namespace NBXplorer.Controllers
 			[FromQuery(Name = "strategy")] CoinSelectionStrategy strategy = CoinSelectionStrategy.SmallestFirst,
 			[FromQuery(Name = "ignoreOutpoint")] string[] ignoreOutpoint = null)
 		{
-			var trackedSource = GetTrackedSource(derivationScheme, address);
-			if (trackedSource == null)
-				throw new ArgumentNullException(nameof(trackedSource));
-			var network = GetNetwork(cryptoCode, false);
-			var repo = (PostgresRepository)RepositoryProvider.GetRepository(cryptoCode);
+			var trackedSource = trackedSourceContext.TrackedSource;
+			var repo = trackedSourceContext.Repository;
+			var network = trackedSourceContext.Network;
 
 			await using var conn = await ConnectionFactory.CreateConnection();
 			var height = await conn.ExecuteScalarAsync<long>("SELECT height FROM get_tip(@code)", new { code = network.CryptoCode });
