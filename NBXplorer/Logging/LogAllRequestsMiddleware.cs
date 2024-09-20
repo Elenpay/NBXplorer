@@ -1,9 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
@@ -23,6 +21,11 @@ namespace NBXplorer.Logging
 
 		public async Task Invoke(HttpContext context)
 		{
+			if (context.Request.ContentType == "application/octet-stream")
+			{
+				await _next(context);
+				return;
+			}
 			//First, get the incoming request
 			var request = await FormatRequest(context.Request);
 			Logs.Explorer.LogInformation(request);

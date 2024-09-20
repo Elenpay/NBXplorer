@@ -1,14 +1,11 @@
 ﻿using NBitcoin.RPC;
 using NBXplorer.Configuration;
-using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http;
-using System.Threading.Tasks;
 
 namespace NBXplorer
 {
-	public class RPCClientProvider : IRPCClients
+	public class RPCClientProvider
 	{
 		Dictionary<string, RPCClient> _ChainConfigurations = new Dictionary<string, RPCClient>();
 		public RPCClientProvider(ExplorerConfiguration configuration, IHttpClientFactory httpClientFactory)
@@ -18,7 +15,7 @@ namespace NBXplorer
 				var rpc = config?.RPC;
 				if (rpc != null)
 				{
-					rpc.HttpClient = httpClientFactory.CreateClient(nameof(IRPCClients));
+					rpc.HttpClient = httpClientFactory.CreateClient(nameof(RPCClientProvider));
 					_ChainConfigurations.Add(config.CryptoCode, rpc);
 				}
 			}

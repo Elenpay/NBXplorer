@@ -6,26 +6,18 @@ using NBitcoin;
 using NBitcoin.Tests;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Server.Kestrel;
-using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using NBitcoin.RPC;
 using System.Net;
-using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.Extensions.Configuration;
-using NBXplorer.Logging;
 using NBXplorer.DerivationStrategy;
 using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json.Linq;
-using NBitcoin.Altcoins.Elements;
 using NBitcoin.Scripting;
 
 namespace NBXplorer.Tests
@@ -34,22 +26,14 @@ namespace NBXplorer.Tests
 	{
 		private readonly string _Directory;
 
-		public static ServerTester Create(Backend backend, [CallerMemberNameAttribute] string caller = null)
+		public static ServerTester Create([CallerMemberNameAttribute] string caller = null)
 		{
-			return new ServerTester(backend, caller);
+			return new ServerTester(caller, true);
 		}
 
-		public static ServerTester Create([CallerMemberNameAttribute]string caller = null)
+		public static ServerTester CreateNoAutoStart([CallerMemberNameAttribute] string caller = null)
 		{
-			return Create(Backend.DBTrie, caller);
-		}
-		public static ServerTester CreateNoAutoStart([CallerMemberNameAttribute]string caller = null)
-		{
-			return new ServerTester(Backend.DBTrie, caller, false);
-		}
-		public static ServerTester CreateNoAutoStart(Backend backend, [CallerMemberNameAttribute] string caller = null)
-		{
-			return new ServerTester(backend, caller, false);
+			return new ServerTester(caller, false);
 		}
 
 		public void Dispose()
@@ -74,10 +58,9 @@ namespace NBXplorer.Tests
 		}
 
 		public string Caller { get; }
-		public ServerTester(Backend backend, string directory, bool autoStart = true)
+		public ServerTester(string directory, bool autoStart = true)
 		{
 			_Name = directory;
-			Backend = backend;
 			SetEnvironment();
 			Caller = directory;
 			var rootTestData = "TestData";
@@ -88,27 +71,6 @@ namespace NBXplorer.Tests
 			if (autoStart)
 				Start();
 		}
-
-#if SUPPORT_DBTRIE
-		public async Task Load(string dataName)
-		{
-			datadir = Path.Combine(_Directory, "explorer");
-			if (Directory.Exists(datadir))
-				DeleteFolderRecursive(datadir);
-			Directory.CreateDirectory(_Directory);
-			Directory.CreateDirectory(datadir);
-			datadir = Path.Combine(datadir, "RegTest", "db");
-			Directory.CreateDirectory(datadir);
-			foreach (var file in Directory.GetFiles(Path.Combine("Data", dataName)))
-			{
-				File.Copy(file, Path.Combine(datadir, Path.GetFileName(file)));
-			}
-			LoadedData = true;
-			await using var db = await DBTrie.DBTrieEngine.OpenFromFolder(datadir);
-			using var tx = await db.OpenTransaction();
-			await tx.GetTable("IndexProgress").Delete();
-	}
-#endif
 
 		public RPCWalletType? RPCWalletType
 		{
@@ -159,16 +121,8 @@ namespace NBXplorer.Tests
 			var port = CustomServer.FreeTcpPort();
 			List<(string key, string value)> keyValues = new List<(string key, string value)>();
 			keyValues.Add(("conf", Path.Combine(datadir, "settings.config")));
-			if (Backend == Backend.Postgres)
-			{
-				PostgresConnectionString ??= GetTestPostgres(null, _Name);
-				keyValues.Add(("postgres", PostgresConnectionString));
-			}
-			else
-			{
-				additionalFlags.Add("--dbtrie");
-				keyValues.Add(("cachechain", "0"));
-			}
+			PostgresConnectionString ??= GetTestPostgres(null, _Name);
+			keyValues.Add(("postgres", PostgresConnectionString));
 			keyValues.AddRange(AdditionalConfiguration);
 			keyValues.Add(("datadir", datadir));
 			keyValues.Add(("port", port.ToString()));
@@ -218,7 +172,7 @@ namespace NBXplorer.Tests
 				.Build();
 			NBXplorer.Logging.Logs.Configure(Host.Services.GetRequiredService<ILoggerFactory>());
 			NBXplorerNetwork = ((NBXplorerNetworkProvider)Host.Services.GetService(typeof(NBXplorerNetworkProvider))).GetFromCryptoCode(CryptoCode);
-			RPC = ((IRPCClients)Host.Services.GetService(typeof(IRPCClients))).Get(NBXplorerNetwork);
+			RPC = ((RPCClientProvider)Host.Services.GetService(typeof(RPCClientProvider))).Get(NBXplorerNetwork);
 			var conf = (ExplorerConfiguration)Host.Services.GetService(typeof(ExplorerConfiguration));
 			Host.Start();
 			Configuration = conf;
@@ -498,8 +452,6 @@ namespace NBXplorer.Tests
 		public bool LoadedData { get; private set; }
 
 		private readonly string _Name;
-
-		public Backend Backend { get; set; }
 
 		public uint256 SendToAddress(BitcoinAddress address, Money amount)
 		{

@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Linq;
 using System.Collections.Generic;
-using System.Text;
 using NBitcoin;
 using NBXplorer.DerivationStrategy;
 using Newtonsoft.Json;
@@ -29,6 +28,10 @@ namespace NBXplorer.Models
 			get; set;
 		}
 
+		public List<MatchedInput> Inputs
+		{
+			get; set;
+		} = new List<MatchedInput>();
 		public List<MatchedOutput> Outputs
 		{
 			get; set;
@@ -65,5 +68,14 @@ namespace NBXplorer.Models
 		public int Index { get; set; }
 		public IMoney Value { get; set; }
 		public BitcoinAddress Address { get; set; }
+	}
+
+	public class MatchedInput : MatchedOutput
+	{
+		public int InputIndex { get; set; }
+		public uint256 TransactionId
+		{
+			get; set;
+		}
 	}
 }

@@ -53,16 +53,11 @@ Read our [API Specification](./docs/API.md).
 
 ## Prerequisite
 
-* Install [.NET Core SDK v6.0 or above](https://www.microsoft.com/net/download)
-* Bitcoin Core instance synched and running (at least 0.16.0).
-* PostgresSQL v13+ (Technically 11+ works, but you may have performance issues at higher scale)
+* Install [.NET Core SDK v8.0 or above](https://www.microsoft.com/net/download)
+* Bitcoin Core instance synched and running (at least 24.0).
+* PostgresSQL v13+
 
-There are two backend available:
-
-* DBTrie (with the `--dbtrie` flag)
-* [Postgres](./docs/Postgres-Schema.md) (with the `--postgres` flags)
-
-However, `DBTrie` is now deprecated. We will continue to support it to give more time for our users [to migrate](./docs/Postgres-Migration.md).
+Use `--postgres` flag to setup the connection string. See [schema documentation](./docs/Postgres-Schema.md).
 
 ## API Specification
 
@@ -120,11 +115,11 @@ You can check [the sample](docker-compose.regtest.yml) for configuring and compo
 
 ## How to develop on it?
 
-If you are on Windows, I recommend Visual Studio 2017 update 4 (15.4).
+If you are on Windows, I recommend Visual Studio 2022 (17.8.0).
 If you are on other platform and want lightweight environment, use [Visual Studio Code](https://code.visualstudio.com/).
 If you are hardcore, you can code on vim.
 
-I like Visual Studio Code and Visual Studio 2017 as it allows me to debug in step by step.
+I like Visual Studio Code and Visual Studio 2022 as it allows me to debug in step by step.
 
 ## How to configure?
 

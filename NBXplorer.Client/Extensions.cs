@@ -1,11 +1,8 @@
 ﻿using NBitcoin;
 using NBitcoin.RPC;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Net.WebSockets;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -38,27 +35,6 @@ namespace NBXplorer
 			{
 				yield return batch;
 			}
-		}
-
-		public static ArraySegment<T> Slice<T>(this ArraySegment<T> array, int index)
-		{
-			
-			if((uint)index > (uint)array.Count)
-			{
-				throw new ArgumentOutOfRangeException(nameof(index));
-			}
-
-			return new ArraySegment<T>(array.Array, array.Offset + index, array.Count - index);
-		}
-
-		public static ArraySegment<T> Slice<T>(this ArraySegment<T> array, int index, int count)
-		{
-			if((uint)index > (uint)array.Count || (uint)count > (uint)(array.Count - index))
-			{
-				throw new ArgumentOutOfRangeException(nameof(index));
-			}
-
-			return new ArraySegment<T>(array.Array, array.Offset + index, count);
 		}
 
 		public static async Task CloseSocket(this WebSocket socket, WebSocketCloseStatus status, string statusDescription, CancellationToken cancellation = default)

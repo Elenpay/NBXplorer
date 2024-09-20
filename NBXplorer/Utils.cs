@@ -1,10 +1,8 @@
-﻿using NBitcoin;
-using NBXplorer.Backends;
+﻿using NBXplorer.Backend;
 using NBXplorer.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 
 namespace NBXplorer
 {
@@ -44,7 +42,7 @@ namespace NBXplorer
 		static ICollection<AnnotatedTransaction> TopologicalSortCore(this IReadOnlyCollection<AnnotatedTransaction> transactions)
 		{
 			return transactions.TopologicalSort(
-			   dependsOn: t => t.Record.SpentOutpoints.Select(o => o.Hash),
+			   dependsOn: t => t.Record.SpentOutpoints.Select(o => o.Outpoint.Hash),
 			   getKey: t => t.Record.TransactionHash,
 			   getValue: t => t,
 			   solveTies: AnnotatedTransactionComparer.OldToYoung);

@@ -7,7 +7,9 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "NBXPLORER_POSTGRES": "User ID=postgres;Application Name=test;Include Error Detail=true;Host=localhost;Port=39383",
-        "NBXPLORER_AUTOMIGRATE": "1"
+        "NBXPLORER_BTCSTARTHEIGHT": "860200",
+        "NBXPLORER_BTCRESCAN": "1",
+        "NBXPLORER_BTCRPCCOOKIEFILE": "D:\\Bitcoin\\.cookie"
       },
       "applicationUrl": "http://localhost:4774",
       "launchUrl": "v1/cryptos/btc/status"
@@ -31,7 +33,7 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "NBXPLORER_EXPOSERPC": "true",
-        "NBXPLORER_POSTGRES": "Host=localhost;Port=35432;Database=nbxplorer;User ID=rw_dev;Password=rw_dev",
+        "NBXPLORER_POSTGRES": "Host=localhost;Port=35432;Database=nbxplorer;User ID=postgres",
         "NBXPLORER_BTCRPCUSER": "polaruser",
         "NBXPLORER_BTCRPCPASSWORD": "polarpass",
         "NBXPLORER_BTCRPCURL": "http://localhost:18443/",

@@ -1,7 +1,5 @@
 using NBitcoin;
-using System;
 using System.Collections.Generic;
-using System.Text;
 
 namespace NBXplorer.Models
 {
@@ -35,6 +33,10 @@ namespace NBXplorer.Models
 		/// </summary>
 		public bool? RBF { get; set; }
 		/// <summary>
+		/// Whether this transaction should merge the outputs.
+		/// </summary>
+		public bool? MergeOutputs { get; set; }
+		/// <summary>
 		/// The destinations where to send the money
 		/// </summary>
 		public List<CreatePSBTDestination> Destinations { get; set; } = new List<CreatePSBTDestination>();
@@ -60,6 +62,11 @@ namespace NBXplorer.Models
 		/// Only select the following outpoints for creating the PSBT (default to null)
 		/// </summary>
 		public List<OutPoint> IncludeOnlyOutpoints { get; set; }
+
+		/// <summary>
+		/// If `true`, all the UTXOs that have been selected will be used as input in the PSBT. (default to false)
+		/// </summary>
+		public bool? SpendAllMatchingOutpoints { get; set; }
 
 		/// <summary>
 		/// Use a specific change address (Optional, default: null, mutually exclusive with ReserveChangeAddress)

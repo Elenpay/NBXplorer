@@ -3,17 +3,19 @@ using Newtonsoft.Json.Linq;
 using NBitcoin.RPC;
 using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using NBXplorer.Models;
 using NBitcoin.DataEncoders;
 using System.Threading;
 using Microsoft.Extensions.Logging;
-using NBXplorer.Backends;
+using NBXplorer.Backend;
 using System.Text.RegularExpressions;
 using System.Net.Http;
 using System.Net;
+using System.Net.Http.Headers;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using NBitcoin.Crypto;
 
 namespace NBXplorer
 {
@@ -82,6 +84,21 @@ namespace NBXplorer
 
 	public static class RPCClientExtensions
 	{
+		public static async Task<ScanTxoutSetResponse> StartScanTxoutSetExAsync(this RPCClient rpc, ScanTxoutSetParameters parameters, CancellationToken cancellationToken)
+		{
+			int delay = 100;
+			retry:
+			try
+			{
+				return await rpc.StartScanTxoutSetAsync(parameters, cancellationToken);
+			}
+			catch (RPCException ex) when (!cancellationToken.IsCancellationRequested && ex.Message.StartsWith("Scan already in progress", StringComparison.OrdinalIgnoreCase))
+			{
+				await Task.Delay(delay, cancellationToken);
+				delay = Math.Max(delay * 2, 10_000);
+				goto retry;
+			}
+		}
 		public static async Task<bool?> SupportTxIndex(this RPCClient rpc)
 		{
 			try
@@ -231,13 +248,25 @@ namespace NBXplorer
 
 			throw new Exception("This should never happen");
 		}
+		public static async Task<BlockHeaders> GetBlockHeadersAsync(this RPCClient rpc, IList<int> blockHeights, CancellationToken cancellationToken)
+		{
+			var batch = rpc.PrepareBatch();
+			var hashes = blockHeights.Select(h => batch.GetBlockHashAsync(h)).ToArray();
+			await batch.SendBatchAsync();
 
-		public static async Task<SlimChainedBlock> GetBlockHeaderAsyncEx(this NBitcoin.RPC.RPCClient rpc, uint256 blk)
+			batch = rpc.PrepareBatch();
+			var headers = hashes.Select(async h => await batch.GetBlockHeaderAsyncEx(await h, cancellationToken)).ToArray();
+			await batch.SendBatchAsync();
+
+			return new BlockHeaders(headers.Select(h => h.GetAwaiter().GetResult()).Where(h => h is not null).ToList());
+		}
+
+		public static async Task<RPCBlockHeader> GetBlockHeaderAsyncEx(this RPCClient rpc, uint256 blk, CancellationToken cancellationToken)
 		{
 			var header = await rpc.SendCommandAsync(new NBitcoin.RPC.RPCRequest("getblockheader", new[] { blk.ToString() })
 			{
 				ThrowIfRPCError = false
-			});
+			}, cancellationToken);
 			if (header.Result is null || header.Error is not null)
 				return null;
 			var response = header.Result;
@@ -246,10 +275,15 @@ namespace NBXplorer
 				return null;
 
 			var prev = response["previousblockhash"]?.Value<string>();
-			return new SlimChainedBlock(blk, prev is null ? null : new uint256(prev), response["height"].Value<int>());
+			return new RPCBlockHeader(
+				blk,
+				prev is null ? null : new uint256(prev),
+				response["height"].Value<int>(),
+				NBitcoin.Utils.UnixTimeToDateTime(response["time"].Value<long>()),
+				new uint256(response["merkleroot"]?.Value<string>()));
 		}
 
-		public static async Task<SavedTransaction> TryGetRawTransaction(this RPCClient client, uint256 txId)
+		public static async Task<SavedTransaction> TryGetRawTransaction(this RPCClient client, uint256 txId, CancellationToken cancellationToken)
 		{
 			var request = new RPCRequest(RPCOperations.getrawtransaction, new object[] { txId, true }) { ThrowIfRPCError = false };
 			var response = await client.SendCommandAsync(request);
@@ -260,7 +294,7 @@ namespace NBXplorer
 				if (rpcResult["blockhash"] != null)
 				{
 					blockHash = uint256.Parse(rpcResult.Value<string>("blockhash"));
-					var blockHeader = await client.GetBlockHeaderAsyncEx(blockHash);
+					var blockHeader = await client.GetBlockHeaderAsyncEx(blockHash, cancellationToken);
 					if (blockHeader is not null)
 						blockHeight = blockHeader.Height;
 					else

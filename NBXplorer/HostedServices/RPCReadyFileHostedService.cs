@@ -2,11 +2,10 @@
 using NBXplorer.Configuration;
 using NBXplorer.Events;
 using System;
-using System.Linq;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using NBXplorer.Backends;
+using NBXplorer.Backend;
 
 namespace NBXplorer.HostedServices
 {
@@ -15,7 +14,7 @@ namespace NBXplorer.HostedServices
 	/// </summary>
 	public class RPCReadyFileHostedService : IHostedService
 	{
-		public RPCReadyFileHostedService(EventAggregator eventAggregator, IIndexers indexers, ExplorerConfiguration explorerConfiguration)
+		public RPCReadyFileHostedService(EventAggregator eventAggregator, Indexers indexers, ExplorerConfiguration explorerConfiguration)
 		{
 			EventAggregator = eventAggregator;
 			Indexers = indexers;
@@ -23,7 +22,7 @@ namespace NBXplorer.HostedServices
 		}
 
 		public EventAggregator EventAggregator { get; }
-		public IIndexers Indexers { get; }
+		public Indexers Indexers { get; }
 		public ExplorerConfiguration ExplorerConfiguration { get; }
 
 		IDisposable disposable;

@@ -1,22 +1,16 @@
 ﻿#nullable enable
 using Dapper;
-using Microsoft.Extensions.Logging;
 using NBitcoin;
-using NBitcoin.DataEncoders;
-using NBXplorer.Configuration;
 using NBXplorer.DerivationStrategy;
-using NBXplorer.Logging;
-using NBXplorer.Models;
 using Npgsql;
-using Npgsql.TypeMapping;
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Data.Common;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 
-namespace NBXplorer.Backends.Postgres
+namespace NBXplorer.Backend
 {
 	public class DbConnectionHelper : IDisposable, IAsyncDisposable
 	{
@@ -53,18 +47,14 @@ namespace NBXplorer.Backends.Postgres
 		public record NewInRaw(string tx_id, long idx, string spent_tx_id, long spent_idx);
 		internal record OutpointRaw(string tx_id, long idx);
 
-		public static void Register(INpgsqlTypeMapper typeMapper)
+		public static void Register(NpgsqlDataSourceBuilder dsBuilder)
 		{
-			typeMapper.MapComposite<NewOutRaw>("new_out");
-			typeMapper.MapComposite<NewInRaw>("new_in");
-			typeMapper.MapComposite<OutpointRaw>("outpoint");
-			typeMapper.MapComposite<PostgresRepository.DescriptorScriptInsert>("nbxv1_ds");
+			dsBuilder.MapComposite<NewOutRaw>("new_out");
+			dsBuilder.MapComposite<NewInRaw>("new_in");
+			dsBuilder.MapComposite<OutpointRaw>("outpoint");
+			dsBuilder.MapComposite<Repository.DescriptorScriptInsert>("nbxv1_ds");
 		}
 
-		public class FetchOptions
-		{
-			public Money? MinUtxoValue { get; set; }
-		}
 		public Task<bool> FetchMatches(IEnumerable<Transaction> txs, SlimChainedBlock slimBlock, Money? minUtxoValue)
 		{
 			var outCount = txs.Select(t => t.Outputs.Count).Sum();
@@ -128,11 +118,33 @@ namespace NBXplorer.Backends.Postgres
 			{
 				ins.Add(new NewInRaw(ni.txId.ToString(), ni.idx, ni.spentTxId.ToString(), ni.spentIdx));
 			}
-			return await Connection.ExecuteScalarAsync<bool>("CALL fetch_matches(@code, @outs, @ins, 'f');", new { code = Network.CryptoCode, outs = outs, ins = ins });
+
+			DynamicParameters parameters = new DynamicParameters();
+			parameters.Add("in_code", Network.CryptoCode);
+			parameters.Add("in_outs", outs);
+			parameters.Add("in_ins", ins);
+			parameters.Add("has_match", dbType: System.Data.DbType.Boolean, direction: ParameterDirection.InputOutput);
+			await Connection.QueryAsync<int>("fetch_matches", parameters, commandType: CommandType.StoredProcedure);
+			return parameters.Get<bool>("has_match");
 		}
-		public async Task SaveTransactions(IEnumerable<(Transaction? Transaction, uint256? Id, uint256? BlockId, int? BlockIndex, long? BlockHeight, bool immature, DateTimeOffset? SeenAt)> transactions)
+		public record SaveTransactionRecord(Transaction? Transaction, uint256? Id, uint256? BlockId, int? BlockIndex, long? BlockHeight, bool Immature, DateTimeOffset? SeenAt)
 		{
-			var parameters = transactions.Select(tx =>
+			public static SaveTransactionRecord Create(TrackedTransaction t) => new SaveTransactionRecord(t.Transaction, t.TransactionHash, t.BlockHash, t.BlockIndex, t.BlockHeight, t.IsCoinBase, new DateTimeOffset?(t.FirstSeen));
+			public static SaveTransactionRecord Create(SlimChainedBlock slimBlock, Transaction tx, int? blockIndex, DateTimeOffset now) => new SaveTransactionRecord(
+						tx,
+						tx.GetHash(),
+						slimBlock?.Hash,
+						blockIndex,
+						slimBlock?.Height,
+						tx.IsCoinBase,
+						now
+					);
+		}
+		public async Task SaveTransactions(IEnumerable<SaveTransactionRecord> transactions)
+		{
+			var parameters = transactions
+				.DistinctBy(o => o.Id)
+				.Select(tx =>
 			new
 			{
 				code = Network.CryptoCode,
@@ -143,7 +155,7 @@ namespace NBXplorer.Backends.Postgres
 				seen_at = tx.SeenAt,
 				blk_idx = tx.BlockIndex is int i ? i : 0,
 				blk_height = tx.BlockHeight,
-				immature = tx.immature
+				immature = tx.Immature
 			})
 			.Where(o => o.id is not null)
 			.ToArray();
@@ -210,6 +222,12 @@ namespace NBXplorer.Backends.Postgres
 			if (result is null)
 				return null;
 			return Network.Serializer.ToObject<TMetadata>(result);
+		}
+
+		public async Task<HashSet<uint256>> GetUnconfirmedTxs()
+		{
+			var txs = await Connection.QueryAsync<string>("SELECT tx_id FROM txs WHERE code=@code AND mempool IS TRUE;", new { code = Network.CryptoCode });
+			return new HashSet<uint256>(txs.Select(t => uint256.Parse(t)));
 		}
 
 		public async Task NewBlock(SlimChainedBlock newTip)

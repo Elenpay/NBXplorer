@@ -2,8 +2,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -13,7 +11,7 @@ namespace NBXplorer.Authentication
 {
 	public class BasicAuthenticationHandler : AuthenticationHandler<BasicAuthenticationOptions>
 	{
-		public BasicAuthenticationHandler(IOptionsMonitor<BasicAuthenticationOptions> options, ILoggerFactory logger, UrlEncoder encoder, ISystemClock clock) : base(options, logger, encoder, clock)
+		public BasicAuthenticationHandler(IOptionsMonitor<BasicAuthenticationOptions> options, ILoggerFactory logger, UrlEncoder encoder) : base(options, logger, encoder)
 		{
 		}
 

@@ -1,8 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using Xunit;
 
 namespace NBXplorer.Tests
@@ -11,6 +7,14 @@ namespace NBXplorer.Tests
 	public class TheoryWithTimeoutAttribute : TheoryAttribute
 	{
 		public TheoryWithTimeoutAttribute()
+		{
+			Timeout = 60_000;
+		}
+	}
+	[AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
+	public class FactWithTimeoutAttribute : FactAttribute
+	{
+		public FactWithTimeoutAttribute()
 		{
 			Timeout = 60_000;
 		}

@@ -1,15 +1,12 @@
 ﻿using NBitcoin;
 using NBXplorer.DerivationStrategy;
 using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.Text;
-using NBXplorer.JsonConverters;
 
 namespace NBXplorer.Models
 {
 	public class GenerateWalletResponse
 	{
+		public string TrackedSource { get; set; }
 		public string Mnemonic { get; set; }
 		public string Passphrase { get; set; }
 		[JsonConverter(typeof(NBXplorer.JsonConverters.WordlistJsonConverter))]

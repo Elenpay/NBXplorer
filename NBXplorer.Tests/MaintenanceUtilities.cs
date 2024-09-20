@@ -1,9 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Xunit;
@@ -22,7 +19,7 @@ namespace NBXplorer.Tests
 		[Trait("Maintenance", "Maintenance")]
 		public async Task GenerateFullSchema()
 		{
-			using var t = ServerTester.Create(Backend.Postgres);
+			using var t = ServerTester.Create();
 			var script = await GenerateDbScript(t);
 			File.WriteAllText(GetFullSchemaFile(), script);
 		}

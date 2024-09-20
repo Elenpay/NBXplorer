@@ -2,9 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using NBitcoin;
-using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
 
 namespace NBXplorer
@@ -71,29 +69,47 @@ namespace NBXplorer
 			Transaction = transaction;
 			transaction.PrecomputeHash(false, true);
 			KnownKeyPathMapping = knownScriptMapping;
-
-			KnownKeyPathMappingUpdated();
+			if ((TrackedSource as IDestination)?.ScriptPubKey is Script s)
+				OwnedScripts.Add(s);
+			foreach (var ss in knownScriptMapping.Keys)
+				OwnedScripts.Add(ss);
+			OwnedScriptsUpdated();
 		}
 
-		internal void KnownKeyPathMappingUpdated()
+		internal void OwnedScriptsUpdated()
 		{
 			if (Transaction == null)
 				return;
-			var scriptPubKey = (TrackedSource as IDestination)?.ScriptPubKey;
+			ReceivedCoins.Clear();
+			SpentOutpoints.Clear();
 			for (int i = 0; i < Transaction.Outputs.Count; i++)
 			{
 				var output = Transaction.Outputs[i];
-				if (KnownKeyPathMapping.ContainsKey(output.ScriptPubKey) || scriptPubKey == output.ScriptPubKey)
+				if (OwnedScripts.Contains(output.ScriptPubKey))
 					ReceivedCoins.Add(new Coin(new OutPoint(Key.TxId, i), output));
 			}
+
 			if (!Transaction.IsCoinBase)
-				SpentOutpoints.AddRange(Transaction.Inputs.Select(input => input.PrevOut));
+				SpentOutpoints.AddInputs(Transaction);
 		}
 
+		public HashSet<Script> OwnedScripts { get; } = new HashSet<Script>();
 		public Dictionary<Script, KeyPath> KnownKeyPathMapping { get; } = new Dictionary<Script, KeyPath>();
-		public Dictionary<Script, KeyPathInformation> KnownKeyPathInformation { get; } = new Dictionary<Script, KeyPathInformation>();
+		public Dictionary<Script, BitcoinAddress> KnownAddresses { get; } = new Dictionary<Script, BitcoinAddress>();
 		public HashSet<ICoin> ReceivedCoins { get; protected set; } = new HashSet<ICoin>(CoinOutpointEqualityComparer.Instance);
-		public HashSet<OutPoint> SpentOutpoints { get; } = new HashSet<OutPoint>();
+
+		public class SpentOutpointsSet : HashSet<(OutPoint Outpoint, int InputIndex)>
+		{
+			public void AddInputs(Transaction tx)
+			{
+				foreach (var asIndexedInput in tx.Inputs.AsIndexedInputs())
+				{
+					Add((asIndexedInput.PrevOut, (int)asIndexedInput.Index));
+				}
+			}
+			public void Add(OutPoint outpoint, int inputIndex) => Add((outpoint, inputIndex));
+		}
+		public SpentOutpointsSet SpentOutpoints { get; } = new();
 
 		public Transaction Transaction
 		{
@@ -132,15 +148,15 @@ namespace NBXplorer
 		public long? BlockHeight { get; set; }
 		public bool Immature { get; internal set; }
 		public HashSet<uint256> Replacing { get; internal set; }
-
+		public List<MatchedInput> MatchedInputs { get; private set; } = new List<MatchedInput>();
 		public IEnumerable<MatchedOutput> GetReceivedOutputs()
 		{
 			return this.ReceivedCoins
 							.Select(o => (Index: (int)o.Outpoint.N,
 												   Output: o,
 												   KeyPath: KnownKeyPathMapping.TryGet(o.TxOut.ScriptPubKey),
-												   Address: KnownKeyPathInformation.TryGet(o.TxOut.ScriptPubKey)?.Address))
-							.Where(o => o.KeyPath != null || o.Output.TxOut.ScriptPubKey == (TrackedSource as IDestination)?.ScriptPubKey)
+												   Address: KnownAddresses.TryGet(o.TxOut.ScriptPubKey)))
+							.Where(o => o.KeyPath != null || o.Output.TxOut.ScriptPubKey == (TrackedSource as IDestination)?.ScriptPubKey || TrackedSource is GroupTrackedSource)
 							.Select(o => new MatchedOutput()
 							{
 								Index = o.Index,
@@ -151,34 +167,25 @@ namespace NBXplorer
 							});
 		}
 
-		public virtual ITrackedTransactionSerializable CreateBitcoinSerializable()
-		{
-			return new TransactionMatchData(this);
-		}
-
-		Dictionary<OutPoint, int> inputsIndexes;
-		public int IndexOfInput(OutPoint spent)
-		{
-			if (Transaction is null)
-				throw new InvalidOperationException("IndexOfInput need access to the underlying transaction");
-			if (inputsIndexes is null)
-			{
-				inputsIndexes = new Dictionary<OutPoint, int>(Transaction.Inputs.Count);
-				int i = 0;
-				foreach (var outpoint in Transaction.Inputs.Select(i => i.PrevOut))
-				{
-					inputsIndexes.Add(outpoint, i);
-					i++;
-				}
-			}
-			return inputsIndexes[spent];
-		}
-
 		internal void AddKnownKeyPathInformation(KeyPathInformation keyInfo)
 		{
 			if (keyInfo.KeyPath != null)
 				this.KnownKeyPathMapping.TryAdd(keyInfo.ScriptPubKey, keyInfo.KeyPath);
-			this.KnownKeyPathInformation.TryAdd(keyInfo.ScriptPubKey, keyInfo);
+			if (keyInfo.Address != null)
+				this.KnownAddresses.TryAdd(keyInfo.ScriptPubKey, keyInfo.Address);
+			this.OwnedScripts.Add(keyInfo.ScriptPubKey);
+		}
+
+		public void UpdateMatchedInputs(IEnumerable<MatchedInput> matchedInputs)
+		{
+			MatchedInputs = new List<MatchedInput>(matchedInputs);
+			foreach (var mi in MatchedInputs)
+			{
+				if (this.KnownAddresses.TryGetValue(mi.ScriptPubKey, out var addr))
+					mi.Address = addr;
+				if (this.KnownKeyPathMapping.TryGetValue(mi.ScriptPubKey, out var keypath))
+					mi.KeyPath = keypath;
+			}
 		}
 	}
 

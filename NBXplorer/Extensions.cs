@@ -1,6 +1,4 @@
-﻿using Microsoft.AspNetCore.Hosting;
-using System.Linq;
-using Microsoft.Extensions.Logging;
+﻿using System.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NBitcoin;
@@ -11,38 +9,61 @@ using System.Text;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 using Microsoft.AspNetCore.Mvc;
 using NBXplorer.Filters;
-using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Configuration;
 using NBXplorer.DerivationStrategy;
 using NBitcoin.Crypto;
 using NBXplorer.Models;
-using System.IO;
-using NBXplorer.Logging;
-using System.Net;
 using NBitcoin.RPC;
 using Microsoft.Extensions.Hosting;
 using System.Threading.Tasks;
-using System.Threading;
 using Microsoft.AspNetCore.Authentication;
 using NBXplorer.Authentication;
-using NBitcoin.DataEncoders;
-using System.Text.RegularExpressions;
 using NBXplorer.MessageBrokers;
-using NBitcoin.Protocol;
 using NBXplorer.HostedServices;
 using NBXplorer.Controllers;
-#if SUPPORT_DBTRIE
-using NBXplorer.Backends.DBTrie;
-#endif
-using NBXplorer.Backends.Postgres;
-using NBXplorer.Backends;
+
+using NBXplorer.Backend;
 using NBitcoin.Altcoins.Elements;
+using Npgsql;
+using NBitcoin.Altcoins;
+using System.Threading;
+using Newtonsoft.Json.Linq;
 
 namespace NBXplorer
 {
 	public static class Extensions
 	{
+		public static T ParseJObject<T>(this NBXplorerNetwork network, JObject requestObj)
+		{
+			if (requestObj == null)
+				return default;
+			return network.Serializer.ToObject<T>(requestObj);
+		}
+		public static async Task<NpgsqlConnection> ReliableOpenConnectionAsync(this NpgsqlDataSource ds, CancellationToken cancellationToken = default)
+		{
+			int maxRetries = 10;
+			int retries = maxRetries;
+			retry:
+			var conn = ds.CreateConnection();
+			try
+			{
+				await conn.OpenAsync(cancellationToken);
+			}
+			catch (PostgresException ex) when (!cancellationToken.IsCancellationRequested && ex.IsTransient && retries > 0)
+			{
+				retries--;
+				await conn.DisposeAsync();
+				await Task.Delay((maxRetries - retries) * 100, cancellationToken);
+				goto retry;
+			}
+			catch
+			{
+				conn.Dispose();
+				throw;
+			}
+			return conn;
+		}
 		public static bool IsUnknown(this IMoney money)
 		{
 			return money is AssetMoney am && am == NBXplorerNetwork.UnknownAssetMoney;
@@ -117,15 +138,6 @@ namespace NBXplorer
 			}
 			return keyPathInformation;
 		}
-#if NETCOREAPP21
-		class MVCConfigureOptions : IConfigureOptions<MvcJsonOptions>
-		{
-			public void Configure(MvcJsonOptions options)
-			{
-				new Serializer(null).ConfigureSerializer(options.SerializerSettings);
-			}
-		}
-#endif
 
 		public class ConfigureCookieFileBasedConfiguration : IConfigureNamedOptions<BasicAuthenticationOptions>
 		{
@@ -171,61 +183,29 @@ namespace NBXplorer
 				mvc.Filters.Add(new NBXplorerExceptionFilter());
 			});
 
-#if NETCOREAPP21
-			services.AddSingleton<IConfigureOptions<MvcJsonOptions>, MVCConfigureOptions>();
-			services.AddSingleton<MvcNewtonsoftJsonOptions>();
-#else
 			services.AddSingleton<MvcNewtonsoftJsonOptions>(o =>  o.GetRequiredService<IOptions<MvcNewtonsoftJsonOptions>>().Value);
-#endif
 
 			services.TryAddSingleton<CookieRepository>();
 			services.TryAddSingleton<Broadcaster>();
 
-			// MainController wants to resolve this, even if unused by postgres backend
-			services.TryAddSingleton<RebroadcasterHostedService>();
-			if (configuration.IsPostgres())
-			{
-				services.AddHostedService<HostedServices.DatabaseSetupHostedService>();
-				services.AddSingleton<IHostedService, IRepositoryProvider>(o => o.GetRequiredService<IRepositoryProvider>());
-				services.TryAddSingleton<IRepositoryProvider, PostgresRepositoryProvider>();
-				services.AddSingleton<DbConnectionFactory>();
-#if SUPPORT_DBTRIE
-				if (configuration.GetOrDefault("AUTOMIGRATE", false))
-				{
-					services.AddHostedService<HostedServices.DBTrieToPostgresMigratorHostedService>();
-					services.TryAddSingleton<ChainProvider>();
-					services.TryAddSingleton<RepositoryProvider>();
-				}
-#endif
-				services.TryAddTransient<IUTXOService, PostgresMainController>();
-				services.TryAddSingleton<PostgresIndexers>();
-				services.TryAddSingleton<IIndexers>(o => o.GetRequiredService<PostgresIndexers>());
-				services.AddSingleton<IHostedService, PostgresIndexers>(o => o.GetRequiredService<PostgresIndexers>());
+			services.AddHostedService<HostedServices.DatabaseSetupHostedService>();
+			services.AddSingleton<IHostedService, RepositoryProvider>(o => o.GetRequiredService<RepositoryProvider>());
+			services.TryAddSingleton<RepositoryProvider, RepositoryProvider>();
+			services.AddSingleton<DbConnectionFactory>();
+			services.TryAddSingleton<Indexers>();
+			services.TryAddSingleton<Indexers>(o => o.GetRequiredService<Indexers>());
+			services.AddSingleton<IHostedService, Indexers>(o => o.GetRequiredService<Indexers>());
 
-				services.AddSingleton<CheckMempoolTransactionsPeriodicTask>();
-				services.AddSingleton<RefreshWalletHistoryPeriodicTask>();
-				services.AddTransient<ScheduledTask>(o => new ScheduledTask(typeof(RefreshWalletHistoryPeriodicTask), TimeSpan.FromMinutes(30.0)));
-				services.AddTransient<ScheduledTask>(o => new ScheduledTask(typeof(CheckMempoolTransactionsPeriodicTask), TimeSpan.FromMinutes(5.0)));
-				services.AddHostedService<PeriodicTaskLauncherHostedService>();
-			}
-#if SUPPORT_DBTRIE
-			else
-			{
-				services.TryAddTransient<IUTXOService, MainController>();
-				services.TryAddSingleton<ChainProvider>();
-				services.AddSingleton<IHostedService, IRepositoryProvider>(o => o.GetRequiredService<IRepositoryProvider>());
-				services.TryAddSingleton<IRepositoryProvider, RepositoryProvider>();
-				services.TryAddSingleton<BitcoinDWaiters>();
-				services.TryAddSingleton<IIndexers>(o => o.GetRequiredService<BitcoinDWaiters>());
-				services.AddSingleton<IHostedService, BitcoinDWaiters>(o => o.GetRequiredService<BitcoinDWaiters>());
-				services.AddSingleton<IHostedService, RebroadcasterHostedService>(o => o.GetRequiredService<RebroadcasterHostedService>());
-			}
-#endif
+			services.AddSingleton<CheckMempoolTransactionsPeriodicTask>();
+			services.AddSingleton<RefreshWalletHistoryPeriodicTask>();
+			services.AddTransient<ScheduledTask>(o => new ScheduledTask(typeof(RefreshWalletHistoryPeriodicTask), TimeSpan.FromMinutes(30.0)));
+			services.AddTransient<ScheduledTask>(o => new ScheduledTask(typeof(CheckMempoolTransactionsPeriodicTask), TimeSpan.FromMinutes(5.0)));
+			services.AddHostedService<PeriodicTaskLauncherHostedService>();
 
 			services.TryAddSingleton<EventAggregator>();
 			services.TryAddSingleton<AddressPoolService>();
 			services.AddSingleton<IHostedService, AddressPoolService>(o => o.GetRequiredService<AddressPoolService>());
-			services.TryAddSingleton<IRPCClients, RPCClientProvider>();
+			services.TryAddSingleton<RPCClientProvider>();
 			services.AddHostedService<RPCReadyFileHostedService>();
 			services.AddSingleton<IHostedService, ScanUTXOSetService>();
 			services.TryAddSingleton<ScanUTXOSetServiceAccessor>();
@@ -247,7 +227,6 @@ namespace NBXplorer
 				var c = o.GetRequiredService<ExplorerConfiguration>();
 				return c.NetworkProvider;
 			});
-			services.TryAddSingleton<IRPCClients>();
 			return services;
 		}
 

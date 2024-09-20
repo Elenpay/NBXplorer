@@ -1,7 +1,7 @@
 ﻿using Dapper;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using NBXplorer.Backends.Postgres;
+using NBXplorer.Backend;
 using Npgsql;
 using System.Collections.Generic;
 using System.Globalization;
@@ -27,41 +27,42 @@ namespace NBXplorer.HostedServices
 		public async Task StartAsync(CancellationToken cancellationToken)
 		{
 			Logger.LogInformation("Postgres services activated");
+			var dsBuilder = ConnectionFactory.CreateDataSourceBuilder(b => b.CommandTimeout = Constants.TenHours);
 			retry:
 			try
 			{
-				await using var conn = await ConnectionFactory.CreateConnection(b =>
-				{
-					// 10H timeout
-					b.CommandTimeout = Constants.TenHours;
-				});
+				await using var ds = dsBuilder.Build();
+				using var conn = await ds.ReliableOpenConnectionAsync();
 				await RunScripts(conn);
 			}
-			catch (Npgsql.NpgsqlException pgex) when (pgex.SqlState == "3D000")
+			catch (Npgsql.NpgsqlException pgex) when (pgex.SqlState == PostgresErrorCodes.InvalidCatalogName)
 			{
-				var builder = new Npgsql.NpgsqlConnectionStringBuilder(ConnectionFactory.ConnectionString);
-				var dbname = builder.Database;
-				Logger.LogInformation($"Database '{dbname}' doesn't exists, creating it...");
-				builder.Database = null;
-				var conn2Str = builder.ToString();
-				var conn2 = new Npgsql.NpgsqlConnection(conn2Str);
-				await conn2.OpenAsync();
-				await conn2.ExecuteAsync($"CREATE DATABASE {dbname} TEMPLATE 'template0' LC_CTYPE 'C' LC_COLLATE 'C' ENCODING 'UTF8'");
+				string dbname = string.Empty;
+				await using var ds = ConnectionFactory.CreateDataSourceBuilder(b =>
+				{
+					dbname = b.Database;
+					Logger.LogInformation($"Database '{dbname}' doesn't exists, creating it...");
+					b.Database = null;
+				}).Build();
+				using var conn = await ds.ReliableOpenConnectionAsync();
+				await conn.ExecuteAsync($"CREATE DATABASE {dbname} TEMPLATE 'template0' LC_CTYPE 'C' LC_COLLATE 'C' ENCODING 'UTF8'");
 				goto retry;
 			}
 		}
 
-		private async Task RunScripts(System.Data.Common.DbConnection conn)
+		private async Task RunScripts(NpgsqlConnection conn)
 		{
-			DbConnectionHelper.Register(NpgsqlConnection.GlobalTypeMapper);
 			await using (conn)
 			{
+				if (conn.PostgreSqlVersion.Major <= 11)
+					Logger.LogWarning($"You are using postgres {conn.PostgreSqlVersion.Major}, this major release reached end-of-life (EOL) and is no longer supported, use at your own risks. (https://www.postgresql.org/support/versioning/)");
+
 				HashSet<string> executed;
 				try
 				{
 					executed = (await conn.QueryAsync<string>("SELECT script_name FROM nbxv1_migrations")).ToHashSet();
 				}
-				catch (Npgsql.NpgsqlException ex) when (ex.SqlState == "42P01")
+				catch (Npgsql.NpgsqlException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
 				{
 					executed = new HashSet<string>();
 				}
@@ -75,6 +76,12 @@ namespace NBXplorer.HostedServices
 					var scriptName = $"{parts[^3]}.{parts[^2]}";
 					if (executed.Contains(scriptName))
 						continue;
+					if (scriptName == "018.FastWalletRecent" && conn.PostgreSqlVersion.Major <= 11)
+					{
+						Logger.LogWarning($"Skipping script {scriptName} because it is not supported by postgres {conn.PostgreSqlVersion.Major}");
+						continue;
+					}
+
 					var stream = System.Reflection.Assembly.GetExecutingAssembly()
 														   .GetManifestResourceStream(resource);
 					string content = null;
@@ -85,7 +92,7 @@ namespace NBXplorer.HostedServices
 					Logger.LogInformation($"Execute script {scriptName}...");
 					await conn.ExecuteAsync($"{content}; INSERT INTO nbxv1_migrations VALUES (@scriptName)", new { scriptName });
 				}
-				((NpgsqlConnection)conn).ReloadTypes();
+				await conn.ReloadTypesAsync();
 			}
 		}
 

@@ -1,10 +1,8 @@
-using NBitcoin;
 using System.Linq;
 using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
 using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -32,7 +30,7 @@ namespace NBXplorer
 
 		internal async Task ConnectAsync(CancellationToken cancellation)
 		{
-			var uri = _Client.GetFullUri($"v1/cryptos/{_Client.CryptoCode}/connect", null);
+			var uri = _Client.GetFullUri($"v1/cryptos/{_Client.CryptoCode}/connect");
 			uri = ToWebsocketUri(uri);
 			WebSocket socket = null;
 			try

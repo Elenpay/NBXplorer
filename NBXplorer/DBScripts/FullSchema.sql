@@ -92,9 +92,11 @@ BEGIN
   END IF;
   -- Remove from spent_outs all outputs whose tx isn't in the mempool anymore
   DELETE FROM spent_outs so
-  WHERE so.code = NEW.code AND NOT so.tx_id=ANY(
-	SELECT tx_id FROM txs
-	WHERE code=NEW.code AND mempool IS TRUE);
+  WHERE so.code = NEW.code
+  AND NOT EXISTS (
+    -- Returns true if any tx referenced by the spent_out is in the mempool
+    SELECT 1 FROM txs
+    WHERE code=so.code AND mempool IS TRUE AND tx_id = ANY(ARRAY[so.tx_id, so.spent_by, so.prev_spent_by]));
   RETURN NEW;
 END
 $$;
@@ -186,21 +188,22 @@ BEGIN
 	BEGIN
 	  TRUNCATE TABLE matched_outs, matched_ins, matched_conflicts, new_ins;
 	EXCEPTION WHEN others THEN
-	  CREATE TEMPORARY TABLE matched_outs (LIKE new_out);
-	  ALTER TABLE matched_outs ADD COLUMN "order" BIGINT;
-	  CREATE TEMPORARY TABLE new_ins (LIKE new_in);
-	  ALTER TABLE new_ins ADD COLUMN "order" BIGINT;
-	  ALTER TABLE new_ins ADD COLUMN code TEXT;
-	  CREATE TEMPORARY TABLE matched_ins (LIKE new_ins);
-	  ALTER TABLE matched_ins ADD COLUMN script TEXT;
-	  ALTER TABLE matched_ins ADD COLUMN value bigint;
-	  ALTER TABLE matched_ins ADD COLUMN asset_id TEXT;
-	  CREATE TEMPORARY TABLE matched_conflicts (
+	  CREATE TEMPORARY TABLE IF NOT EXISTS matched_outs (LIKE new_out);
+	  ALTER TABLE matched_outs ADD COLUMN IF NOT EXISTS "order" BIGINT;
+	  CREATE TEMPORARY TABLE IF NOT EXISTS new_ins (LIKE new_in);
+	  ALTER TABLE new_ins ADD COLUMN IF NOT EXISTS "order" BIGINT;
+	  ALTER TABLE new_ins ADD COLUMN IF NOT EXISTS code TEXT;
+	  CREATE TEMPORARY TABLE IF NOT EXISTS matched_ins (LIKE new_ins);
+	  ALTER TABLE matched_ins ADD COLUMN IF NOT EXISTS script TEXT;
+	  ALTER TABLE matched_ins ADD COLUMN IF NOT EXISTS value bigint;
+	  ALTER TABLE matched_ins ADD COLUMN IF NOT EXISTS asset_id TEXT;
+	  CREATE TEMPORARY TABLE IF NOT EXISTS matched_conflicts (
 		code TEXT,
 		spent_tx_id TEXT,
 		spent_idx BIGINT,
 		replacing_tx_id TEXT,
-		replaced_tx_id TEXT);
+		replaced_tx_id TEXT,
+		is_new BOOLEAN);
 	END;
 	has_match := 'f';
 	INSERT INTO matched_outs
@@ -228,16 +231,27 @@ BEGIN
 	  JOIN matched_outs o ON i.spent_tx_id = o.tx_id AND i.spent_idx = o.idx) i
 	ORDER BY "order";
 	DELETE FROM new_ins
-	WHERE NOT tx_id=ANY(SELECT tx_id FROM matched_ins) AND NOT tx_id=ANY(SELECT tx_id FROM matched_outs);
+	WHERE NOT tx_id=ANY(SELECT tx_id FROM matched_ins UNION SELECT tx_id FROM matched_outs)
+	AND NOT (spent_tx_id || spent_idx::TEXT)=ANY(SELECT (tx_id || idx::TEXT) FROM spent_outs);
 	INSERT INTO matched_conflicts
 	WITH RECURSIVE cte(code, spent_tx_id, spent_idx, replacing_tx_id, replaced_tx_id) AS
 	(
-	  SELECT in_code code, i.spent_tx_id, i.spent_idx, i.tx_id replacing_tx_id, so.spent_by replaced_tx_id FROM new_ins i
+	  SELECT 
+		in_code code,
+		i.spent_tx_id,
+		i.spent_idx,
+		i.tx_id replacing_tx_id,
+		CASE
+			WHEN so.spent_by != i.tx_id THEN so.spent_by
+			ELSE so.prev_spent_by
+		END replaced_tx_id,
+		so.spent_by != i.tx_id is_new
+	  FROM new_ins i
 	  JOIN spent_outs so ON so.code=in_code AND so.tx_id=i.spent_tx_id AND so.idx=i.spent_idx
 	  JOIN txs rt ON so.code=rt.code AND rt.tx_id=so.spent_by
-	  WHERE so.spent_by != i.tx_id AND rt.code=in_code AND rt.mempool IS TRUE
+	  WHERE rt.code=in_code AND rt.mempool IS TRUE
 	  UNION
-	  SELECT c.code, c.spent_tx_id, c.spent_idx, c.replacing_tx_id, i.tx_id replaced_tx_id FROM cte c
+	  SELECT c.code, c.spent_tx_id, c.spent_idx, c.replacing_tx_id, i.tx_id replaced_tx_id, c.is_new FROM cte c
 	  JOIN outs o ON o.code=c.code AND o.tx_id=c.replaced_tx_id
 	  JOIN ins i ON i.code=c.code AND i.spent_tx_id=o.tx_id AND i.spent_idx=o.idx
 	  WHERE i.code=c.code AND i.mempool IS TRUE
@@ -268,7 +282,7 @@ BEGIN
 	IF FOUND THEN
 	  has_match := 't';
 	END IF;
-	PERFORM 1 FROM matched_conflicts LIMIT 1;
+	PERFORM 1 FROM matched_conflicts WHERE is_new IS TRUE LIMIT 1;
 	IF FOUND THEN
 	  has_match := 't';
 	END IF;
@@ -315,9 +329,7 @@ $$;
 CREATE FUNCTION get_wallets_recent(in_wallet_id text, in_code text, in_asset_id text, in_interval interval, in_limit integer, in_offset integer) RETURNS TABLE(code text, asset_id text, tx_id text, seen_at timestamp with time zone, balance_change bigint, balance_total bigint)
     LANGUAGE sql STABLE
     AS $$
-  -- We need to materialize, if too many utxos, postgres just call this one over and over...
-  -- however Postgres 11 doesn't support AS MATERIALIZED :(
-  WITH this_balances AS (
+  WITH this_balances AS MATERIALIZED (
 	  SELECT code, asset_id, unconfirmed_balance FROM wallets_balances
 	  WHERE wallet_id=in_wallet_id
   ),
@@ -575,6 +587,8 @@ BEGIN
 	SELECT tx_id FROM matched_outs
 	UNION
 	SELECT tx_id FROM matched_ins
+    UNION
+    SELECT replacing_tx_id FROM matched_conflicts
   ) q
   ON CONFLICT (code, tx_id)
   DO UPDATE SET seen_at=in_seen_at
@@ -591,7 +605,7 @@ BEGIN
   SELECT in_code, spent_tx_id, spent_idx, tx_id FROM new_ins
   ON CONFLICT DO NOTHING;
   FOR r IN
-	SELECT * FROM matched_conflicts
+	SELECT * FROM matched_conflicts WHERE is_new IS TRUE
   LOOP
 	UPDATE spent_outs SET spent_by=r.replacing_tx_id, prev_spent_by=r.replaced_tx_id
 	WHERE code=r.code AND tx_id=r.spent_tx_id AND idx=r.spent_idx;
@@ -944,7 +958,8 @@ CREATE VIEW nbxv1_keypath_info AS
     s.addr,
     d.metadata AS descriptor_metadata,
     nbxv1_get_keypath(d.metadata, ds.idx) AS keypath,
-    ds.metadata AS descriptors_scripts_metadata
+    ds.metadata AS descriptors_scripts_metadata,
+    ws.wallet_id
    FROM ((wallets_scripts ws
      JOIN scripts s ON (((s.code = ws.code) AND (s.script = ws.script))))
      LEFT JOIN ((wallets_descriptors wd
@@ -1214,6 +1229,8 @@ CREATE INDEX wallets_history_by_seen_at ON wallets_history USING btree (seen_at)
 
 CREATE UNIQUE INDEX wallets_history_pk ON wallets_history USING btree (wallet_id, code, asset_id, tx_id);
 
+CREATE INDEX wallets_wallets_parent_id ON wallets_wallets USING btree (parent_id);
+
 CREATE TRIGGER blks_confirmed_trigger AFTER UPDATE ON blks FOR EACH ROW EXECUTE FUNCTION public.blks_confirmed_update_txs();
 
 CREATE TRIGGER blks_txs_insert_trigger AFTER INSERT ON blks_txs FOR EACH ROW EXECUTE FUNCTION public.blks_txs_denormalize();
@@ -1343,6 +1360,13 @@ INSERT INTO nbxv1_migrations VALUES ('012.PerfFixGetWalletsRecent');
 INSERT INTO nbxv1_migrations VALUES ('013.FixTrackedTransactions');
 INSERT INTO nbxv1_migrations VALUES ('014.FixAddressReuse');
 INSERT INTO nbxv1_migrations VALUES ('015.AvoidWAL');
+INSERT INTO nbxv1_migrations VALUES ('016.FixTempTableCreation');
+INSERT INTO nbxv1_migrations VALUES ('017.FixDoubleSpendDetection');
+INSERT INTO nbxv1_migrations VALUES ('018.FastWalletRecent');
+INSERT INTO nbxv1_migrations VALUES ('019.FixDoubleSpendDetection2');
+INSERT INTO nbxv1_migrations VALUES ('020.ReplacingShouldBeIdempotent');
+INSERT INTO nbxv1_migrations VALUES ('021.KeyPathInfoReturnsWalletId');
+INSERT INTO nbxv1_migrations VALUES ('022.WalletsWalletsParentIdIndex');
 
 ALTER TABLE ONLY nbxv1_migrations
     ADD CONSTRAINT nbxv1_migrations_pkey PRIMARY KEY (script_name);
