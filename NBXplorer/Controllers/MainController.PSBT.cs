@@ -29,6 +29,12 @@ namespace NBXplorer.Controllers
 			var network = trackedSourceContext.Network;
 			CreatePSBTRequest request = network.ParseJObject<CreatePSBTRequest>(body);
 
+			var psbtVersion = request.PSBTVersion switch
+			{
+				2 => PSBTVersion.PSBTv2,
+				_ => PSBTVersion.PSBTv0
+			};
+
 			var repo = RepositoryProvider.GetRepository(network);
 			var txBuilder = request.Seed is int s ? network.NBitcoinNetwork.CreateTransactionBuilder(s)
 												: network.NBitcoinNetwork.CreateTransactionBuilder();
@@ -240,14 +246,18 @@ namespace NBXplorer.Controllers
 			bool sweepAll = false;
 			foreach (var dest in request.Destinations)
 			{
+				if (dest.Amount is not null && dest.Amount < Money.Zero)
+					throw new NBXplorerException(new NBXplorerError(400, "output-too-small", "Amount can't be negative", reason: OutputTooSmallException.ErrorType.TooSmallBeforeSubtractedFee.ToString()));
+				if (dest.Destination is null)
+					throw new NBXplorerException(new NBXplorerError(400, "missing-parameter", "`destination` is missing"));
 				if (dest.SweepAll)
 				{
 					sweepAll = true;
-					txBuilder.SendAll(dest.Destination);
+					txBuilder.SendAll(dest.Destination.ScriptPubKey);
 				}
 				else
 				{
-					txBuilder.Send(dest.Destination, dest.Amount);
+					txBuilder.Send(dest.Destination.ScriptPubKey, dest.Amount);
 					if (dest.SubstractFees)
 					{
 						try
@@ -299,11 +309,7 @@ namespace NBXplorer.Controllers
 						txBuilder.SendEstimatedFees(fallbackFeeRate);
 					}
 				}
-				else if (request.FeePreference?.ExplicitFee is Money explicitFee)
-				{
-					txBuilder.SendFees(explicitFee);
-				}
-				else
+				else if (request.FeePreference?.ExplicitFee is null)
 				{
 					try
 					{
@@ -315,9 +321,13 @@ namespace NBXplorer.Controllers
 						txBuilder.SendEstimatedFees(fallbackFeeRate);
 					}
 				}
+				if (request.FeePreference?.ExplicitFee is Money explicitFee)
+				{
+					txBuilder.SendFees(explicitFee);
+				}
 				if (request.SpendAllMatchingOutpoints is true)
 					txBuilder.SendAllRemainingToChange();
-				psbt = txBuilder.BuildPSBT(false);
+				psbt = txBuilder.BuildPSBT(false, psbtVersion);
 				hasChange = psbt.Outputs.Any(o => o.ScriptPubKey == change.ScriptPubKey);
 			}
 			catch (OutputTooSmallException ex) when (ex.Reason == OutputTooSmallException.ErrorType.TooSmallAfterSubtractedFee)
@@ -352,15 +362,15 @@ namespace NBXplorer.Controllers
 				{
 					change = (derivation.ScriptPubKey, derivation.KeyPath);
 					txBuilder.SetChange(change.ScriptPubKey);
-					psbt = txBuilder.BuildPSBT(false);
+					psbt = txBuilder.BuildPSBT(false, psbtVersion);
 				}
 			}
 
-			var tx = psbt.GetOriginalTransaction();
+			var tx = psbt.GetGlobalTransaction();
 			if (request.Version is uint v)
 				tx.Version = v;
 			txBuilder.SetSigningOptions(SigHash.All);
-			psbt = txBuilder.CreatePSBTFrom(tx, false);
+			psbt = txBuilder.CreatePSBTFrom(tx, psbtVersion, false);
 
 			var update = new UpdatePSBTRequest()
 			{
@@ -398,8 +408,7 @@ namespace NBXplorer.Controllers
 		private async Task UpdatePSBTCore(UpdatePSBTRequest update, NBXplorerNetwork network)
 		{
 			var repo = RepositoryProvider.GetRepository(network);
-			var rpc = GetAvailableRPC(network);
-			await UpdateUTXO(update, repo, rpc);
+			await this.UtxoFetcherService.UpdateUTXO(update);
 			if (update.DerivationScheme is DerivationStrategyBase derivationScheme)
 			{
 				if (update.IncludeGlobalXPub is true)
@@ -411,13 +420,6 @@ namespace NBXplorer.Controllers
 				}
 				await UpdateHDKeyPathsWitnessAndRedeem(update, repo);
 			}
-			if (!update.AlwaysIncludeNonWitnessUTXO)
-			{
-				foreach (var input in update.PSBT.Inputs)
-					input.TrySlimUTXO();
-			}
-
-
 			HashSet<PubKey> rebased = new HashSet<PubKey>();
 			if (update.RebaseKeyPaths != null)
 			{
@@ -450,21 +452,22 @@ namespace NBXplorer.Controllers
 				// * HDTaprootKeyPaths is used instead of HDKeyPaths
 				// * TaprootSighashType is explicitely set to default
 				// * Fill up TaprootInternalKey
-				foreach (var input in update.PSBT.Inputs)
+				foreach (var c in update.PSBT.Inputs.OfType<PSBTCoin>().Concat(update.PSBT.Outputs))
 				{
-					input.TaprootSighashType = TaprootSigHash.Default;
-					if (input.HDKeyPaths.Count != 1)
+					if (c is PSBTInput input)
+						input.TaprootSighashType = TaprootSigHash.Default;
+					if (c.HDKeyPaths.Count != 1)
 						continue;
-					foreach (var keypath in input.HDKeyPaths)
+					foreach (var keypath in c.HDKeyPaths)
 					{
 						var taprootPubKey = keypath.Key.GetTaprootFullPubKey();
-						input.TaprootInternalKey = taprootPubKey.InternalKey;
+						c.TaprootInternalKey = taprootPubKey.InternalKey;
 						// Some consumers expect the internal key to be in the HDTaprootKeyPaths
-						if (!TaprootPubKey.TryCreate(input.TaprootInternalKey.ToBytes(), out var pk))
+						if (!TaprootPubKey.TryCreate(c.TaprootInternalKey.ToBytes(), out var pk))
 							continue;
-						input.HDTaprootKeyPaths.AddOrReplace(pk, new TaprootKeyPath(keypath.Value));
+						c.HDTaprootKeyPaths.AddOrReplace(pk, new TaprootKeyPath(keypath.Value));
 					}
-					input.HDKeyPaths.Clear();
+					c.HDKeyPaths.Clear();
 				}
 			}
 		}
@@ -476,7 +479,7 @@ namespace NBXplorer.Controllers
 			var keyInfosByScriptPubKey = new Dictionary<Script, KeyPathInformation>();
 			var scriptPubKeys = update.PSBT.Outputs.OfType<PSBTCoin>().Concat(update.PSBT.Inputs)
 											.Where(o => !o.HDKeyPaths.Any())
-											.Select(o => o.GetCoin()?.ScriptPubKey)
+											.Select(o => o.GetTxOut()?.ScriptPubKey)
 											.Where(s => s != null).ToArray();
 			foreach (var keyInfos in (await repo.GetKeyInformations(scriptPubKeys)))
 			{
@@ -498,7 +501,7 @@ namespace NBXplorer.Controllers
 			List<Script> redeems = new List<Script>();
 			foreach (var c in update.PSBT.Outputs.OfType<PSBTCoin>().Concat(update.PSBT.Inputs.Where(o => !o.IsFinalized())))
 			{
-				var script = c.GetCoin()?.ScriptPubKey;
+				var script = c.GetTxOut()?.ScriptPubKey;
 				if (script != null &&
 					keyInfosByScriptPubKey.TryGetValue(script, out var keyInfo))
 				{
@@ -513,101 +516,6 @@ namespace NBXplorer.Controllers
 			}
 			if (redeems.Count != 0)
 				update.PSBT.AddScripts(redeems.ToArray());
-		}
-
-
-		static bool NeedUTXO(UpdatePSBTRequest request, PSBTInput input)
-		{
-			if (input.IsFinalized())
-				return false;
-			if (request.AlwaysIncludeNonWitnessUTXO && input.NonWitnessUtxo is null)
-				return true;
-			var needNonWitnessUTXO = NeedNonWitnessUTXO(request, input);
-			if (needNonWitnessUTXO)
-				return input.NonWitnessUtxo == null;
-			else
-				return input.WitnessUtxo == null && input.NonWitnessUtxo == null;
-		}
-
-		private static bool NeedNonWitnessUTXO(UpdatePSBTRequest request, PSBTInput input)
-		{
-			return request.AlwaysIncludeNonWitnessUTXO || (!input.PSBT.Network.Consensus.NeverNeedPreviousTxForSigning &&
-												!((input.GetSignableCoin() ?? input.GetCoin())?.IsMalleable is false));
-		}
-
-		private async Task UpdateUTXO(UpdatePSBTRequest update, Repository repo, RPCClient rpc)
-		{
-			if (rpc is not null)
-			{
-				try
-				{
-					update.PSBT = await rpc.UTXOUpdatePSBT(update.PSBT);
-				}
-				// Best effort
-				catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
-				{
-				}
-				catch
-				{
-				}
-			}
-
-			if (update.DerivationScheme is DerivationStrategyBase derivationScheme)
-			{
-				AnnotatedTransactionCollection txs = null;
-				// First, we check for data in our history
-				foreach (var input in update.PSBT.Inputs.Where(psbtInput => NeedUTXO(update, psbtInput)))
-				{
-					txs = txs ?? await GetAnnotatedTransactions(repo, new DerivationSchemeTrackedSource(derivationScheme), NeedNonWitnessUTXO(update, input));
-					if (txs.GetByTxId(input.PrevOut.Hash) is AnnotatedTransaction tx)
-					{
-						if (!tx.Record.Key.IsPruned)
-						{
-							input.NonWitnessUtxo = tx.Record.Transaction;
-						}
-						else
-						{
-							input.WitnessUtxo = tx.Record.ReceivedCoins.FirstOrDefault(c => c.Outpoint.N == input.PrevOut.N)
-								?.TxOut;
-						}
-					}
-				}
-			}
-
-			// then, we search data in the saved transactions
-			await Task.WhenAll(update.PSBT.Inputs
-							.Where(psbtInput => NeedUTXO(update, psbtInput))
-							.Select(async (input) =>
-							{
-								// If this is not segwit, or we are unsure of it, let's try to grab from our saved transactions
-								if (input.NonWitnessUtxo == null)
-								{
-									var prev = await repo.GetSavedTransactions(input.PrevOut.Hash);
-									if (prev.FirstOrDefault() is SavedTransaction saved)
-									{
-										input.NonWitnessUtxo = saved.Transaction;
-									}
-								}
-							}).ToArray());
-
-			// finally, we check with rpc's txindex
-			if (rpc is not null && HasTxIndex(repo.Network))
-			{
-				var batch = rpc.PrepareBatch();
-				var getTransactions = Task.WhenAll(update.PSBT.Inputs
-					.Where(psbtInput => NeedUTXO(update, psbtInput))
-					.Where(input => input.NonWitnessUtxo == null && NeedNonWitnessUTXO(update, input))
-					.Select(async input =>
-					{
-						var tx = await batch.GetRawTransactionAsync(input.PrevOut.Hash, false);
-						if (tx != null)
-						{
-							input.NonWitnessUtxo = tx;
-						}
-					}).ToArray());
-				await batch.SendBatchAsync();
-				await getTransactions;
-			}
 		}
 	}
 }
