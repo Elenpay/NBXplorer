@@ -152,8 +152,7 @@ namespace NBXplorer.Tests
 				keyValues.Add(("rmqtranex", RabbitMqTestConfig.RabbitMqTransactionExchange));
 				keyValues.Add(("rmqblockex", RabbitMqTestConfig.RabbitMqBlockExchange));
 			}
-			var args = keyValues.SelectMany(kv => new[] { $"--{kv.key}", kv.value }
-			.Concat(new[] { $"--{CryptoCode.ToLowerInvariant()}hastxindex" }))
+			var args = keyValues.SelectMany(kv => new[] { $"--{kv.key}", kv.value })
 			.Concat(AdditionalFlags)
 			.Concat(additionalFlags).ToArray();
 			Host = new WebHostBuilder()
@@ -207,7 +206,6 @@ namespace NBXplorer.Tests
 		public HttpClient HttpClient { get; internal set; }
 
 		string datadir;
-
 		public void ResetExplorer(bool deleteAll = true)
 		{
 			Host.Dispose();

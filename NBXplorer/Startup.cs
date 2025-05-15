@@ -127,6 +127,7 @@ namespace NBXplorer
 				}
 			}
 
+			services.AddCors();
 		}
 
 		public void Configure(IApplicationBuilder app, IServiceProvider prov,
@@ -149,10 +150,14 @@ namespace NBXplorer
 					await next();
 				});
 			}
+			
+			app.UseDefaultFiles();
+			app.UseStaticFiles();
 			app.UseRouting();
 			app.UseAuthentication();
 			app.UseAuthorization();
 			app.UseWebSockets();
+			
 			//app.UseMiddleware<LogAllRequestsMiddleware>();
 			app.UseEndpoints(endpoints =>
 			{
