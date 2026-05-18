@@ -27,18 +27,9 @@ services:
       - "39388:39388"
     volumes:
     - "bitcoin_datadir:/data"
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    hostname: rabbitmq
-    ports:
-      - 4369:4369
-      - 5671:5671
-      - 5672:5672
-      - 15672:15672
   
   postgres:
-    image:  postgres:13
+    image:  postgres:18.1
     container_name: nbxplorertests_postgres_1
     command: [ "-c", "random_page_cost=1.0", "-c", "shared_preload_libraries=pg_stat_statements" ]
     environment:

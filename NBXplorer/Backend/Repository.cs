@@ -14,11 +14,12 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NBitcoin.Altcoins.Elements;
 using NBXplorer.Client;
-using NBitcoin.Scripting;
 using System.Text.RegularExpressions;
 using Npgsql;
 using static NBXplorer.Backend.DbConnectionHelper;
 using NBitcoin.DataEncoders;
+using NBitcoin.WalletPolicies;
+using Derivation = NBXplorer.DerivationStrategy.Derivation;
 
 
 namespace NBXplorer.Backend
@@ -158,22 +159,27 @@ namespace NBXplorer.Backend
 
 		internal record ScriptInsert(string code, string wallet_id, string script, string addr, bool used);
 		internal record DescriptorScriptInsert(string descriptor, int idx, string script, string metadata, string addr, bool used);
-		public async Task<int> GenerateAddresses(DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query = null)
+
+		public Task<int> GenerateAddresses(DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query = null)
+		=> GenerateAddresses(strategy, strategy.GetLineFor(KeyPathTemplates, derivationFeature), query);
+		public async Task<int> GenerateAddresses(DerivationStrategyBase strategy, DerivationLine derivationLine, GenerateAddressQuery query = null)
 		{
 			await using var connection = await connectionFactory.CreateConnection();
-			return await GenerateAddressesCore(connection, strategy, derivationFeature, query);
+			return await GenerateAddressesCore(connection, strategy, derivationLine, query);
 		}
 
 		record GapNextIndex(long gap, long next_idx);
-		internal async Task<int> GenerateAddressesCore(DbConnection connection, DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query)
+		public Task<int> GenerateAddressesCore(DbConnection connection, DerivationStrategyBase strategy, DerivationFeature derivationFeature, GenerateAddressQuery query)
+=> GenerateAddressesCore(connection, strategy, strategy.GetLineFor(KeyPathTemplates, derivationFeature), query);
+		internal async Task<int> GenerateAddressesCore(DbConnection connection, DerivationStrategyBase strategy, DerivationLine derivationLine, GenerateAddressQuery query)
 		{
-			var descriptorKey = GetDescriptorKey(strategy, derivationFeature);
+			var descriptorKey = GetDescriptorKey(strategy, derivationLine.Feature);
 			var walletKey = GetWalletKey(strategy, Network);
 			var gapNextIndex = await GetGapAndNextIdx(connection, descriptorKey);
 			long toGenerate = ToGenerateCount(query, gapNextIndex?.gap);
 			if (gapNextIndex is not null && toGenerate == 0)
 				return 0;
-			var keyTemplate = KeyPathTemplates.GetKeyPathTemplate(derivationFeature);
+			var keyTemplate = (derivationLine as KeyPathTemplateDerivationLine)?.KeyPathTemplate;
 			if (gapNextIndex is null)
 			{
 				// Let's generate the wallet
@@ -187,7 +193,7 @@ namespace NBXplorer.Backend
 						metadata = Serializer.ToString(new LegacyDescriptorMetadata()
 						{
 							Derivation = strategy,
-							Feature = derivationFeature,
+							Feature = derivationLine.Feature,
 							KeyPathTemplate = keyTemplate,
 							Type = LegacyDescriptorMetadata.TypeName
 						}),
@@ -203,16 +209,15 @@ namespace NBXplorer.Backend
 			do
 			{
 				var nextIndex = gapNextIndex.next_idx;
-				var line = strategy.GetLineFor(keyTemplate);
 				var scriptpubkeys = new Script[toGenerate];
 				var linesScriptpubkeys = new DescriptorScriptInsert[toGenerate];
 				Parallel.For(nextIndex, nextIndex + toGenerate, i =>
 				{
-					var derivation = line.Derive((uint)i);
+					var derivation = derivationLine.Derive((uint)i);
 					scriptpubkeys[i - nextIndex] = derivation.ScriptPubKey;
 
 					var addr = derivation.ScriptPubKey.GetDestinationAddress(Network.NBitcoinNetwork);
-					JObject metadata = GetDescriptorScriptMetadata(strategy, line.KeyPathTemplate.GetKeyPath((int)i, false), derivation, addr);
+					JObject metadata = GetDescriptorScriptMetadata(strategy, derivation, keyTemplate?.GetKeyPath((uint)i), addr);
 					linesScriptpubkeys[i - nextIndex] = new DescriptorScriptInsert(
 						descriptorKey.descriptor,
 						(int)i,
@@ -263,7 +268,7 @@ namespace NBXplorer.Backend
 					}
 					descriptor = ReplaceBase58(descriptor, $"$0/{keyTemplate}");
 					// descriptor: tr([abcdefaa/49'/0'/0']xpriv/0/*)
-					await rpc.ImportDescriptors(OutputDescriptor.AddChecksum(descriptor), fromIndex, fromIndex + toGenerate - 1, default);
+					await rpc.ImportDescriptors(Miniscript.AddChecksum(descriptor), fromIndex, fromIndex + toGenerate - 1, default);
 				}
 			}
 		}
@@ -303,7 +308,7 @@ namespace NBXplorer.Backend
 								});
 		}
 
-		private JObject GetDescriptorScriptMetadata(DerivationStrategyBase strategy, KeyPath keyPath, Derivation derivation, BitcoinAddress addr)
+		private JObject GetDescriptorScriptMetadata(DerivationStrategyBase strategy, Derivation derivation, KeyPath keyPath, BitcoinAddress addr)
 		{
 			JObject metadata = null;
 			if (derivation.Redeem?.ToHex() is string r)
@@ -316,7 +321,7 @@ namespace NBXplorer.Backend
 			{
 				if (!strategy.Unblinded())
 				{
-					var blindingKey = NBXplorerNetworkProvider.LiquidNBXplorerNetwork.GenerateBlindingKey(strategy, keyPath, addr.ScriptPubKey, Network.NBitcoinNetwork);
+					var blindingKey = NBXplorerNetworkProvider.LiquidNBXplorerNetwork.GenerateBlindingKey(strategy, keyPath, derivation.ScriptPubKey, Network.NBitcoinNetwork);
 					var blindedAddress = new BitcoinBlindedAddress(blindingKey.PubKey, addr);
 					metadata ??= new JObject();
 					metadata.Add(new JProperty("blindedAddress", blindedAddress.ToString()));
@@ -458,9 +463,6 @@ namespace NBXplorer.Backend
 				JOIN wallets w USING(wallet_id)", parameters);
 			foreach (var r in rows)
 			{
-				// This might be the case for a derivation added by a different indexer
-				if (r.derivation is not null && r.keypath is null)
-					continue;
 				BitcoinAddress addr = GetAddress(r);
 				bool isExplicit = r.derivation is null;
 				bool isDescriptor = !isExplicit;
@@ -491,11 +493,10 @@ namespace NBXplorer.Backend
 				ki.ScriptPubKey = script;
 				ki.TrackedSource = trackedSource;
 				ki.Feature = DerivationFeature.Deposit;
-				if (keypath is not null)
-				{
+				if (r.feature is not null)
 					ki.Feature = Enum.Parse<DerivationFeature>(r.feature, true);
+				if (r.idx is not null)
 					ki.Index = (int)r.idx;
-				}
 				ki.Redeem = redeem is null ? null : Script.FromHex(redeem);
 				result.Add(script, ki);
 			}
@@ -842,7 +843,7 @@ namespace NBXplorer.Backend
 			var para = new DynamicParameters();
 			var sql = query.GetSql(para, Network);
 			var utxos = await
-				connection.Connection.QueryAsync<(string wallet_id, string tx_id, long idx, string blk_id, long? blk_height, int? blk_idx, bool is_out, string spent_tx_id, long spent_idx, string script, string addr, long value, string asset_id, bool immature, string keypath, DateTime seen_at, string feature)>(sql, para);
+				connection.Connection.QueryAsync<(string wallet_id, string tx_id, long idx, string blk_id, long? blk_height, int? blk_idx, bool is_out, string spent_tx_id, long spent_idx, string script, string addr, long value, string asset_id, bool immature, string keypath, int key_idx, DateTime seen_at, string feature)>(sql, para);
 			utxos.TryGetNonEnumeratedCount(out int c);
 			var trackedById = new Dictionary<(TrackedSource, string), TrackedTransaction>(c);
 			foreach (var utxo in utxos)
@@ -859,6 +860,7 @@ namespace NBXplorer.Backend
 												  : Money.Satoshis(utxo.value),
 						ScriptPubKey = Script.FromHex(utxo.script),
 						KeyPath = utxo.keypath is string kp ? KeyPath.Parse(kp) : null,
+						KeyIndex = utxo.key_idx,
 						Index = (int)utxo.idx,
 						Feature = utxo.feature is string f ? Enum.Parse<DerivationFeature>(f) : null,
 						Address = BitcoinAddress.Create(utxo.addr, this.Network.NBitcoinNetwork)
@@ -876,6 +878,7 @@ namespace NBXplorer.Backend
 						TransactionId = uint256.Parse(utxo.spent_tx_id),
 						Address = utxo.addr is null ? null : BitcoinAddress.Create(utxo.addr, Network.NBitcoinNetwork),
 						KeyPath = utxo.keypath is string kp ? KeyPath.Parse(kp) : null,
+						KeyIndex = utxo.key_idx,
 						ScriptPubKey = Script.FromHex(utxo.script),
 						Value = Money.Satoshis(utxo.value)
 					});
@@ -996,11 +999,10 @@ namespace NBXplorer.Backend
 				if (ki.TrackedSource is DerivationSchemeTrackedSource a)
 				{
 					descriptorKey = GetDescriptorKey(a.DerivationStrategy, ki.Feature);
-					var derivation = a.DerivationStrategy.GetDerivation(ki.KeyPath);
 					metadata = GetDescriptorScriptMetadata(
 								a.DerivationStrategy,
+								new Derivation(ki.ScriptPubKey, ki.Redeem),
 								ki.KeyPath,
-								derivation,
 								addr);
 				}
 

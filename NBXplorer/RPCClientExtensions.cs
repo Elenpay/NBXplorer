@@ -14,6 +14,7 @@ using System.Net.Http;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using NBitcoin.Crypto;
 using NBXplorer.Models;
@@ -100,11 +101,11 @@ namespace NBXplorer
 				goto retry;
 			}
 		}
-		public static async Task<bool?> SupportTxIndex(this RPCClient rpc)
+		public static async Task<bool?> SupportTxIndex(this RPCClient rpc, CancellationToken cancellationToken = default)
 		{
 			try
 			{
-				var result = await rpc.SendCommandAsync(new RPCRequest("getindexinfo", new[] { "txindex" }) { ThrowIfRPCError = false });
+				var result = await WithRetry(() => rpc.SendCommandAsync(new RPCRequest("getindexinfo", new[] { "txindex" }) { ThrowIfRPCError = false }, cancellationToken), cancellationToken);
 				if (result.Error != null)
 					return null;
 				return result.Result["txindex"] is not null;
@@ -116,7 +117,7 @@ namespace NBXplorer
 		}
 		public static async Task<bool> WarmupBlockchain(this RPCClient rpc, ILogger logger)
 		{
-			if (await rpc.GetBlockCountAsync() < rpc.Network.Consensus.CoinbaseMaturity)
+			if (await WithRetry(() => rpc.GetBlockCountAsync()) < rpc.Network.Consensus.CoinbaseMaturity)
 			{
 				logger.LogInformation($"Less than {rpc.Network.Consensus.CoinbaseMaturity} blocks, mining some block for regtest (you can disable with NBXPLORER_NOWARMUP=1)");
 				await rpc.EnsureGenerateAsync(rpc.Network.Consensus.CoinbaseMaturity + 1);
@@ -124,16 +125,16 @@ namespace NBXplorer
 			}
 			else
 			{
-				var hash = await rpc.GetBestBlockHashAsync();
+				var hash = await WithRetry(() => rpc.GetBestBlockHashAsync());
 
 				BlockHeader header = null;
 				try
 				{
-					header = await rpc.GetBlockHeaderAsync(hash);
+					header = await WithRetry(() => rpc.GetBlockHeaderAsync(hash));
 				}
 				catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
 				{
-					header = (await rpc.GetBlockAsync(hash)).Header;
+					header = (await WithRetry(() => rpc.GetBlockAsync(hash))).Header;
 				}
 				if ((DateTimeOffset.UtcNow - header.BlockTime) > TimeSpan.FromSeconds(24 * 60 * 60))
 				{
@@ -151,8 +152,15 @@ namespace NBXplorer
 		=> new()
 		{
 			Fees = entry.BaseFee,
+			Chunk = entry.ChunkFees is null || entry.ChunkWeight is 0 ? null :
+				new TransactionMetadata.ChunkMetadata()
+				{
+					Fees = entry.ChunkFees,
+					Weight = entry.ChunkWeight,
+					FeeRate = GetFeeRate(entry.ChunkFees, ((entry.ChunkWeight + 3) / 4)),
+				},
 			VirtualSize = entry.VirtualSizeBytes,
-			FeeRate = GetFeeRate(entry.BaseFee, entry.VirtualSizeBytes)
+			FeeRate = GetFeeRate(entry.BaseFee, entry.VirtualSizeBytes),
 		};
 
 		// This method fetch some information from getmempoolentry which may be useful for analysis, it's not critical to have it, so we don't want to fail the whole thing if it fails.
@@ -169,7 +177,7 @@ namespace NBXplorer
 				return metadatas;
 			try
 			{
-				await batch.SendBatchAsync(cancellationToken);
+				await WithRetry(() => batch.SendBatchAsync(cancellationToken), cancellationToken);
 				foreach (var t in tasks)
 				{
 					try
@@ -193,8 +201,10 @@ namespace NBXplorer
 		{
 			if (peer is null)
 				return false;
+#pragma warning disable CS0618 // Type or member is obsolete
 			if (peer.IsWhiteListed)
 				return true;
+#pragma warning restore CS0618 // Type or member is obsolete
 			if (peer.Permissions.Contains("noban", StringComparer.OrdinalIgnoreCase))
 				return true;
 			return false;
@@ -218,10 +228,29 @@ namespace NBXplorer
 
 			return blockchainInfo.Headers - blockchainInfo.Blocks > 6;
 		}
-		public static async Task<GetBlockchainInfoResponse> GetBlockchainInfoAsyncEx(this RPCClient client, CancellationToken cancellationToken = default)
+		public static Task<GetBlockchainInfoResponse> GetBlockchainInfoAsyncEx(this RPCClient client, CancellationToken cancellationToken = default)
+		=> WithRetry(async () =>
 		{
-			var result = await client.SendCommandAsync("getblockchaininfo", cancellationToken).ConfigureAwait(false);
+			var result = await client.SendCommandAsync("getblockchaininfo", cancellationToken)
+				.ConfigureAwait(false);
 			return JsonConvert.DeserializeObject<GetBlockchainInfoResponse>(result.ResultString);
+		}, cancellationToken);
+
+		static Task WithRetry(Func<Task> func, CancellationToken cancellationToken = default)
+		=> WithRetry<string>(async () => { await func(); return null; }, cancellationToken);
+		static async Task<T> WithRetry<T>(Func<Task<T>> func, CancellationToken cancellationToken = default)
+		{
+			try
+			{
+				return await func();
+			}
+			catch (HttpRequestException ex) when (ex.InnerException is IOException) { } // Sometimes "The response ended prematurely."
+			catch (IOException) { } // Sometimes "The response ended prematurely."
+			catch (OperationCanceledException) // Timeout can happen if Bitcoin core is really busy
+			{
+			}
+			cancellationToken.ThrowIfCancellationRequested();
+			return await func();
 		}
 
 		public static async Task EnsureWalletCreated(this RPCClient client, ILogger logger)
@@ -229,6 +258,7 @@ namespace NBXplorer
 			var network = client.Network.NetworkSet;
 			var walletName = client.CredentialString.WalletName ?? "";
 			bool created = false;
+			retry:
 			try
 			{
 				await client.CreateWalletAsync(walletName, new CreateWalletOptions()
@@ -244,19 +274,28 @@ namespace NBXplorer
 				// Not supported
 				return;
 			}
-			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR || ex.RPCCode == RPCErrorCode.RPC_WALLET_ALREADY_EXISTS)
+			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_INVALID_PARAMETER && walletName == "")
+			{
+				logger.LogInformation($"{network.CryptoCode}: RPC wallet features are disabled because neither `{network.CryptoCode}.rpc.defaultwallet` nor `NBXPLORER_{network.CryptoCode.ToUpperInvariant()}_RPC_DEFAULTWALLET` is configured.");
+				return;
+			}
+			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR ||
+			                              ex.RPCCode == RPCErrorCode.RPC_WALLET_ALREADY_EXISTS)
 			{
 				// Already exists, let's load it
 			}
-			catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized || ex.StatusCode is HttpStatusCode.Forbidden)
+			catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized ||
+			                                      ex.StatusCode is HttpStatusCode.Forbidden)
 			{
-				// Not allowed, which is fine
+				logger.LogInformation($"{network.CryptoCode}: RPC wallet features are disabled due to the node's policy");
 				return;
 			}
 			catch (Exception ex)
 			{
-				logger.LogWarning(ex, $"{network.CryptoCode}: Failed to create a RPC wallet with unknown error, skipping...");
+				logger.LogWarning(ex,
+					$"{network.CryptoCode}: Failed to create a RPC wallet with unknown error, skipping...");
 			}
+
 			try
 			{
 				await client.LoadWalletAsync(walletName, true);
@@ -276,16 +315,17 @@ namespace NBXplorer
 			}
 		}
 
-		public static async Task<GetNetworkInfoResponse> GetNetworkInfoAsync(this RPCClient client)
-		{
-			var result = await client.SendCommandAsync("getnetworkinfo").ConfigureAwait(false);
-			return JsonConvert.DeserializeObject<GetNetworkInfoResponse>(result.ResultString);
-		}
+		public static Task<GetNetworkInfoResponse> GetNetworkInfoAsync(this RPCClient client, CancellationToken cancellationToken = default)
+			=> WithRetry(async () =>
+			{
+				var result = await client.SendCommandAsync("getnetworkinfo", cancellationToken).ConfigureAwait(false);
+				return JsonConvert.DeserializeObject<GetNetworkInfoResponse>(result.ResultString);
+			}, cancellationToken);
 
-		public static async Task<PSBT> UTXOUpdatePSBT(this RPCClient rpcClient, PSBT psbt)
+		public static async Task<PSBT> UTXOUpdatePSBT(this RPCClient rpcClient, PSBT psbt, CancellationToken cancellationToken = default)
 		{
 			if (psbt == null) throw new ArgumentNullException(nameof(psbt));
-			var response = await rpcClient.SendCommandAsync("utxoupdatepsbt", new object[] { psbt.ToBase64() });
+			var response = await WithRetry(() => rpcClient.SendCommandAsync("utxoupdatepsbt", new object[] { psbt.ToBase64() }, cancellationToken), cancellationToken);
 			response.ThrowIfError();
 			if (response.Error == null && response.Result is JValue rpcResult && rpcResult.Value is string psbtStr)
 			{
@@ -298,32 +338,32 @@ namespace NBXplorer
 		{
 			var batch = rpc.PrepareBatch();
 			var hashes = blockHeights.Select(h => batch.GetBlockHashAsync(h, cancellationToken)).ToArray();
-			await batch.SendBatchAsync(cancellationToken);
+			await WithRetry(() => batch.SendBatchAsync(cancellationToken), cancellationToken);
 
 			batch = rpc.PrepareBatch();
 			var headers = hashes.Select(async h => await batch.GetBlockHeaderAsyncEx(await h, cancellationToken)).ToArray();
-			await batch.SendBatchAsync(cancellationToken);
+			await WithRetry(() => batch.SendBatchAsync(cancellationToken), cancellationToken);
 
 			return new BlockHeaders(headers.Select(h => h.GetAwaiter().GetResult()).Where(h => h is not null).ToList());
 		}
 		public static async Task<BlockHeaders> GetBlockHeadersAsync(this RPCClient rpc, IList<uint256> hashes, CancellationToken cancellationToken)
 		{
 			var batch = rpc.PrepareBatch();
-			await batch.SendBatchAsync(cancellationToken);
+			await WithRetry(() => batch.SendBatchAsync(cancellationToken), cancellationToken);
 
 			batch = rpc.PrepareBatch();
 			var headers = hashes.Select(async h => await batch.GetBlockHeaderAsyncEx(h, cancellationToken)).ToArray();
-			await batch.SendBatchAsync(cancellationToken);
+			await WithRetry(()=> batch.SendBatchAsync(cancellationToken), cancellationToken);
 
 			return new BlockHeaders(headers.Select(h => h.GetAwaiter().GetResult()).Where(h => h is not null).ToList());
 		}
 
 		public static async Task<RPCBlockHeader> GetBlockHeaderAsyncEx(this RPCClient rpc, uint256 blk, CancellationToken cancellationToken)
 		{
-			var header = await rpc.SendCommandAsync(new NBitcoin.RPC.RPCRequest("getblockheader", new[] { blk.ToString() })
+			var header = await WithRetry(() => rpc.SendCommandAsync(new NBitcoin.RPC.RPCRequest("getblockheader", new[] { blk.ToString() })
 			{
 				ThrowIfRPCError = false
-			}, cancellationToken);
+			}, cancellationToken), cancellationToken);
 			if (header.Result is null || header.Error is not null)
 				return null;
 			var response = header.Result;
@@ -343,7 +383,7 @@ namespace NBXplorer
 		public static async Task<SavedTransaction> TryGetRawTransaction(this RPCClient client, uint256 txId, CancellationToken cancellationToken)
 		{
 			var request = new RPCRequest(RPCOperations.getrawtransaction, new object[] { txId, true }) { ThrowIfRPCError = false };
-			var response = await client.SendCommandAsync(request);
+			var response = await WithRetry(() => client.SendCommandAsync(request, cancellationToken), cancellationToken);
 			if (response.Error == null && response.Result is JToken rpcResult && rpcResult["hex"] != null)
 			{
 				uint256 blockHash = null;
@@ -376,7 +416,7 @@ namespace NBXplorer
 			return null;
 		}
 
-		public async static Task<Dictionary<uint256, Transaction>> GetTransactionFromBlocks(this RPCClient rpc, HashSet<(uint256 BlockId, uint256 TransactionId)> txBlockIds, CancellationToken cancellationToken = default)
+		public static async Task<Dictionary<uint256, Transaction>> GetTransactionFromBlocks(this RPCClient rpc, HashSet<(uint256 BlockId, uint256 TransactionId)> txBlockIds, CancellationToken cancellationToken = default)
 		{
 			async Task<Dictionary<uint256, Transaction>> GetTransactionFromStoredBlocks(HashSet<(uint256 BlockId, uint256 TransactionId)> txBlockIds)
 			{
@@ -385,7 +425,7 @@ namespace NBXplorer
 					return result;
 				var batch = rpc.PrepareBatch();
 				var fetching = txBlockIds.Select(b => (b.TransactionId, Fetching: batch.GetRawTransactionAsync(b.TransactionId, b.BlockId, false, cancellationToken))).ToArray();
-				await batch.SendBatchAsync(cancellationToken);
+				await WithRetry(()=> batch.SendBatchAsync(cancellationToken), cancellationToken);
 				foreach (var f in fetching)
 				{
 					Transaction tx = null;
@@ -406,7 +446,7 @@ namespace NBXplorer
 				var downloaded = new HashSet<uint256>();
 				if (blocks.Count == 0)
 					return downloaded;
-				var peers = (await rpc.GetPeersInfoAsync(cancellationToken))
+				var peers = (await WithRetry(() => rpc.GetPeersInfoAsync(cancellationToken), cancellationToken))
 									.Where(p => p.ServicesNames?.Contains("NETWORK") is true)
 									.ToArray();
 				NBitcoin.Utils.Shuffle(peers);
@@ -503,13 +543,13 @@ namespace NBXplorer
 			}
 			throw new NotSupportedException($"Bug of NBXplorer (ERR 3083), please notify the developers");
 		}
-		public static async Task<Dictionary<uint256, Transaction>> GetRawTransactions(this RPCClient rpc, HashSet<uint256> txIds)
+		public static async Task<Dictionary<uint256, Transaction>> GetRawTransactions(this RPCClient rpc, HashSet<uint256> txIds, CancellationToken cancellationToken = default)
 		{
 			if (txIds.Count == 0)
 				return new();
 			var batch = rpc.PrepareBatch();
-			var txs = txIds.Select(t => (Id: t, Tx: batch.GetRawTransactionAsync(t, false))).ToArray();
-			await batch.SendBatchAsync();
+			var txs = txIds.Select(t => (Id: t, Tx: batch.GetRawTransactionAsync(t, false, cancellationToken))).ToArray();
+			await WithRetry(() => batch.SendBatchAsync(cancellationToken), cancellationToken);
 			var res = new Dictionary<uint256, Transaction>();
 			foreach (var txAsync in txs)
 			{
@@ -519,11 +559,11 @@ namespace NBXplorer
 			}
 			return res;
 		}
-		public static async Task<Dictionary<OutPoint, GetTxOutResponse>> GetTxOuts(this RPCClient rpc, IList<OutPoint> outpoints)
+		public static async Task<Dictionary<OutPoint, GetTxOutResponse>> GetTxOuts(this RPCClient rpc, IList<OutPoint> outpoints, CancellationToken cancellationToken = default)
 		{
 			var batch = rpc.PrepareBatch();
-			var txOuts = outpoints.Select(o => batch.GetTxOutAsync(o.Hash, (int)o.N, true)).ToArray();
-			await batch.SendBatchAsync();
+			var txOuts = outpoints.Select(o => batch.GetTxOutAsync(o.Hash, (int)o.N, true, cancellationToken)).ToArray();
+			await WithRetry(() => batch.SendBatchAsync(cancellationToken), cancellationToken);
 			var result = new Dictionary<OutPoint, GetTxOutResponse>();
 			int i = 0;
 			foreach (var txOut in txOuts)

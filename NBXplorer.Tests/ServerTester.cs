@@ -1,7 +1,7 @@
 ﻿using System.Linq;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Hosting;
 using NBXplorer.Configuration;
-using Microsoft.AspNetCore.Hosting;
 using NBitcoin;
 using NBitcoin.Tests;
 using System;
@@ -16,9 +16,11 @@ using NBitcoin.RPC;
 using System.Net;
 using NBXplorer.DerivationStrategy;
 using System.Net.Http;
+using System.Net.Sockets;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using NBitcoin.WalletPolicies;
 using Newtonsoft.Json.Linq;
-using NBitcoin.Scripting;
 
 namespace NBXplorer.Tests
 {
@@ -26,14 +28,14 @@ namespace NBXplorer.Tests
 	{
 		private readonly string _Directory;
 
-		public static ServerTester Create([CallerMemberNameAttribute] string caller = null)
+		public static ServerTester Create(TesterLogs logs, [CallerMemberNameAttribute] string caller = null)
 		{
-			return new ServerTester(caller, true);
+			return new ServerTester(logs, caller, true);
 		}
 
-		public static ServerTester CreateNoAutoStart([CallerMemberNameAttribute] string caller = null)
+		public static ServerTester CreateNoAutoStart(TesterLogs logs, [CallerMemberNameAttribute] string caller = null)
 		{
-			return new ServerTester(caller, false);
+			return new ServerTester(logs, caller, false);
 		}
 
 		public void Dispose()
@@ -57,11 +59,13 @@ namespace NBXplorer.Tests
 			get; set;
 		}
 
+		public TesterLogs Logs { get; }
 		public string Caller { get; }
-		public ServerTester(string directory, bool autoStart = true)
+		public ServerTester(TesterLogs logs, string directory, bool autoStart = true)
 		{
 			_Name = directory;
 			SetEnvironment();
+			Logs = logs;
 			Caller = directory;
 			var rootTestData = "TestData";
 			directory = Path.Combine(rootTestData, directory);
@@ -76,7 +80,7 @@ namespace NBXplorer.Tests
 		{
 			get;
 			set;
-		} = NBitcoin.Tests.RPCWalletType.Legacy;
+		}
 
 		public void Start()
 		{
@@ -109,16 +113,24 @@ namespace NBXplorer.Tests
 				throw;
 			}
 		}
+		
+		static int FreeTcpPort()
+		{
+			TcpListener l = new TcpListener(IPAddress.Loopback, 0);
+			l.Start();
+			int port = ((IPEndPoint)l.LocalEndpoint).Port;
+			l.Stop();
+			return port;
+		}
 
 		public int TrimEvents { get; set; } = -1;
-		public bool UseRabbitMQ { get; set; } = false;
 		public List<(string key, string value)> AdditionalConfiguration { get; set; } = new List<(string key, string value)>();
 		public List<string> AdditionalFlags = new List<string>();
 		internal string PostgresConnectionString;
 		private void StartNBXplorer()
 		{
 			var additionalFlags = new List<string>();
-			var port = CustomServer.FreeTcpPort();
+			var port = FreeTcpPort();
 			List<(string key, string value)> keyValues = new List<(string key, string value)>();
 			keyValues.Add(("conf", Path.Combine(datadir, "settings.config")));
 			PostgresConnectionString ??= GetTestPostgres(null, _Name);
@@ -132,32 +144,17 @@ namespace NBXplorer.Tests
 			keyValues.Add(("verbose", "1"));
 			keyValues.Add(($"{CryptoCode.ToLowerInvariant()}rpcauth", Explorer.GetRPCAuth()));
 			keyValues.Add(($"{CryptoCode.ToLowerInvariant()}rpcurl", Explorer.CreateRPCClient().Address.AbsoluteUri));
+			keyValues.Add(($"{CryptoCode.ToLowerInvariant()}rpcdefaultwallet", "default"));
 			keyValues.Add(("exposerpc", "1"));
 			keyValues.Add(("rpcnotest", "1"));
 			keyValues.Add(("trimevents", TrimEvents.ToString()));
 			keyValues.Add(("mingapsize", "3"));
 			keyValues.Add(("maxgapsize", "8"));
 			keyValues.Add(($"{CryptoCode.ToLowerInvariant()}nodeendpoint", $"{Explorer.Endpoint.Address}:{Explorer.Endpoint.Port}"));
-			keyValues.Add(("asbcnstr", AzureServiceBusTestConfig.ConnectionString));
-			keyValues.Add(("asbblockq", AzureServiceBusTestConfig.NewBlockQueue));
-			keyValues.Add(("asbtranq", AzureServiceBusTestConfig.NewTransactionQueue));
-			keyValues.Add(("asbblockt", AzureServiceBusTestConfig.NewBlockTopic));
-			keyValues.Add(("asbtrant", AzureServiceBusTestConfig.NewTransactionTopic));
-			if (UseRabbitMQ)
-			{
-				keyValues.Add(("rmqhost", RabbitMqTestConfig.RabbitMqHostName));
-				keyValues.Add(("rmqvirtual", RabbitMqTestConfig.RabbitMqVirtualHost));
-				keyValues.Add(("rmquser", RabbitMqTestConfig.RabbitMqUsername));
-				keyValues.Add(("rmqpass", RabbitMqTestConfig.RabbitMqPassword));
-				keyValues.Add(("rmqtranex", RabbitMqTestConfig.RabbitMqTransactionExchange));
-				keyValues.Add(("rmqblockex", RabbitMqTestConfig.RabbitMqBlockExchange));
-			}
 			var args = keyValues.SelectMany(kv => new[] { $"--{kv.key}", kv.value })
 			.Concat(AdditionalFlags)
 			.Concat(additionalFlags).ToArray();
-			Host = new WebHostBuilder()
-				.UseConfiguration(new DefaultConfiguration().CreateConfiguration(args))
-				.UseKestrel()
+			Host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
 				.ConfigureLogging(l =>
 				{
 					l.SetMinimumLevel(LogLevel.Information)
@@ -165,9 +162,16 @@ namespace NBXplorer.Tests
 						.AddFilter("Microsoft", LogLevel.Error)
 						.AddFilter("Hangfire", LogLevel.Error)
 						.AddFilter("NBXplorer.Authentication.BasicAuthenticationHandler", LogLevel.Critical)
+						.ClearProviders()
 						.AddProvider(Logs.LogProvider);
 				})
-				.UseStartup<Startup>()
+				.ConfigureWebHostDefaults(webBuilder =>
+				{
+					webBuilder
+						.UseKestrel()
+						.UseConfiguration(new DefaultConfiguration().CreateConfiguration(args))
+						.UseStartup<Startup>();
+				})
 				.Build();
 			NBXplorer.Logging.Logs.Configure(Host.Services.GetRequiredService<ILoggerFactory>());
 			NBXplorerNetwork = ((NBXplorerNetworkProvider)Host.Services.GetService(typeof(NBXplorerNetworkProvider))).GetFromCryptoCode(CryptoCode);
@@ -208,7 +212,8 @@ namespace NBXplorer.Tests
 		string datadir;
 		public void ResetExplorer(bool deleteAll = true)
 		{
-			Host.Dispose();
+			_ = Host.StopAsync();
+			Host.WaitForShutdown();
 			if (deleteAll)
 			{
 				PostgresConnectionString = null;
@@ -231,7 +236,7 @@ namespace NBXplorer.Tests
 		{
 			get
 			{
-				var address = Host.ServerFeatures.Get<IServerAddressesFeature>().Addresses.FirstOrDefault();
+				var address = Host.GetServerFeatures<IServerAddressesFeature>().Addresses.First();
 				return new Uri(address);
 			}
 		}
@@ -262,7 +267,7 @@ namespace NBXplorer.Tests
 		}
 
 
-		public IWebHost Host
+		public IHost Host
 		{
 			get; set;
 		}
@@ -374,9 +379,11 @@ namespace NBXplorer.Tests
 			var k = PrivateKeyOf(key, path);
 			try
 			{
+#pragma warning disable CS0618 // Type or member is obsolete
 				await RPC.ImportPrivKeyAsync(k).ConfigureAwait(false);
+#pragma warning restore CS0618 // Type or member is obsolete
 			}
-			catch (RPCException ex) when (ex.RPCCode == RPCErrorCode.RPC_WALLET_ERROR)
+			catch (RPCException ex) when (ex.RPCCode is RPCErrorCode.RPC_WALLET_ERROR or RPCErrorCode.RPC_METHOD_NOT_FOUND)
 			{
 				string[] desc;
 				if (this.RPC.Capabilities.SupportSegwit)
@@ -395,8 +402,8 @@ namespace NBXplorer.Tests
 						new JArray(
 						new JObject()
 						{
-							["desc"] = OutputDescriptor.AddChecksum(d),
-							["timestamp"] = this.RPC.Network.Consensus.CoinbaseMaturity
+							["desc"] = Miniscript.AddChecksum(d),
+							["timestamp"] = "now"
 						})
 					}
 					}).ConfigureAwait(false);
@@ -417,7 +424,7 @@ namespace NBXplorer.Tests
 				return key.ExtKey.Derive(new KeyPath(path)).Neuter().PubKey.Hash.GetAddress(Network);
 		}
 
-		public BitcoinAddress AddressOf(DerivationStrategyBase scheme, string path)
+		public BitcoinAddress AddressOf(StandardDerivationStrategyBase scheme, string path)
 		{
 			return scheme.GetDerivation(KeyPath.Parse(path)).ScriptPubKey.GetDestinationAddress(Network);
 		}
@@ -426,14 +433,14 @@ namespace NBXplorer.Tests
 		{
 			return (DirectDerivationStrategy)CreateDerivationStrategy(pubKey, false);
 		}
-		public DerivationStrategyBase CreateDerivationStrategy(ExtPubKey pubKey, bool p2sh)
+		public StandardDerivationStrategyBase CreateDerivationStrategy(ExtPubKey pubKey, bool p2sh)
 		{
 			key = key ?? new ExtKey();
 			pubKey = pubKey ?? key.Neuter();
 			string suffix = this.RPC.Capabilities.SupportSegwit ? "" : "-[legacy]";
 			suffix += p2sh ? "-[p2sh]" : "";
 			scriptPubKeyType = p2sh ? ScriptPubKeyType.SegwitP2SH : ScriptPubKeyType.Segwit;
-			return NBXplorerNetwork.DerivationStrategyFactory.Parse($"{pubKey.ToString(this.Network)}{suffix}");
+			return (StandardDerivationStrategyBase)NBXplorerNetwork.DerivationStrategyFactory.Parse($"{pubKey.ToString(this.Network)}{suffix}");
 		}
 		ExtKey key;
 		ScriptPubKeyType scriptPubKeyType;

@@ -127,8 +127,6 @@ namespace NBXplorer.Models
 
 		public static bool TryParse(ReadOnlySpan<char> trackedSource, out GroupTrackedSource walletTrackedSource)
 		{
-			if (trackedSource == null)
-				throw new ArgumentNullException(nameof(trackedSource));
 			walletTrackedSource = null;
 			if (!trackedSource.StartsWith("GROUP:".AsSpan(), StringComparison.Ordinal))
 				return false;
@@ -177,8 +175,6 @@ namespace NBXplorer.Models
 
 		public static bool TryParse(ReadOnlySpan<char> strSpan, out TrackedSource addressTrackedSource, Network network)
 		{
-			if (strSpan == null)
-				throw new ArgumentNullException(nameof(strSpan));
 			if (network == null)
 				throw new ArgumentNullException(nameof(network));
 			addressTrackedSource = null;
@@ -216,8 +212,6 @@ namespace NBXplorer.Models
 
 		public static bool TryParse(ReadOnlySpan<char> strSpan, out DerivationSchemeTrackedSource derivationSchemeTrackedSource, NBXplorerNetwork network)
 		{
-			if (strSpan == null)
-				throw new ArgumentNullException(nameof(strSpan));
 			if (network == null)
 				throw new ArgumentNullException(nameof(network));
 			derivationSchemeTrackedSource = null;
@@ -246,8 +240,12 @@ namespace NBXplorer.Models
 			}
 			return strategy;
 		}
-
+#if !NO_RECORD
+		public IEnumerable<DerivationFeature> GetDerivationFeatures(KeyPathTemplates keyPathTemplates)
+		=> DerivationStrategy is PolicyDerivationStrategy ? new[] { DerivationFeature.Deposit, DerivationFeature.Change } : keyPathTemplates.GetSupportedDerivationFeatures();
+#else
 		public IEnumerable<DerivationFeature> GetDerivationFeatures(KeyPathTemplates keyPathTemplates)
 		=> keyPathTemplates.GetSupportedDerivationFeatures();
+#endif
 	}
 }
