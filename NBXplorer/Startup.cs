@@ -21,18 +21,13 @@ namespace NBXplorer
 {
 	public class Startup
 	{
-		public Startup(IConfiguration conf, IWebHostEnvironment env, ILoggerFactory loggerFactory)
+		public Startup(IConfiguration conf, IWebHostEnvironment env)
 		{
 			Configuration = conf;
 			_Env = env;
-			LoggerFactory = loggerFactory;
-			Logs = new Logs();
-			Logs.Configure(loggerFactory);
 		}
 
 		private readonly IWebHostEnvironment _Env;
-		public ILoggerFactory LoggerFactory { get; }
-		public Logs Logs { get; }
 
 		public IConfiguration Configuration
 		{
@@ -41,7 +36,8 @@ namespace NBXplorer
 
 		public void ConfigureServices(IServiceCollection services)
 		{
-			var logger = LoggerFactory.CreateLogger<Startup>();
+			using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(b => b.AddConsole());
+			var logger = loggerFactory.CreateLogger<Startup>();
 
 
 			services.AddHttpClient();
