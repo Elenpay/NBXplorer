@@ -8,20 +8,25 @@ using Microsoft.Extensions.Configuration;
 using CommandLine;
 using System.Runtime.CompilerServices;
 using System.Reflection;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using NBitcoin;
 
 [assembly: InternalsVisibleTo("NBXplorer.Tests")]
 namespace NBXplorer
 {
 	public class Program
 	{
-		public static void Main(string[] args)
+		public static async Task Main(string[] args)
 		{
+			ExtPubKey.SkipInvalidMasterExtPubKeyCheck = true;
 			var version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>();
 			var processor = new ConsoleLoggerProcessor();
 			Logs.Configure(new FuncLoggerFactory(i => new CustomerConsoleLogger(i, (a, b) => true, null, processor)));
 			if (version is { InformationalVersion: { } v })
 			Logs.Configuration.LogInformation($"NBXplorer version {v.Split('+')[0]}");
-			IWebHost host = null;
+			IHost host = null;
 			try
 			{
 				var conf = new DefaultConfiguration() { Logger = Logs.Configuration }.CreateConfiguration(args);
@@ -32,13 +37,9 @@ namespace NBXplorer
 				// However, a bug in .NET Core fixed in 2.1 will prevent the app from stopping if an exception is thrown by the host
 				// at startup. We need to remove this line later
 				new ExplorerConfiguration().LoadArgs(conf);
-
-				ConfigurationBuilder builder = new ConfigurationBuilder();
-				host = new WebHostBuilder()
+				
+				host = Host.CreateDefaultBuilder()
 					.UseContentRoot(Directory.GetCurrentDirectory()) 
-					.UseKestrel()
-					.UseIISIntegration()
-					.UseConfiguration(conf)
 					.ConfigureLogging(l =>
 					{
 						l.AddFilter("Microsoft", LogLevel.Error);
@@ -48,11 +49,25 @@ namespace NBXplorer
 						{
 							l.SetMinimumLevel(LogLevel.Debug);
 						}
+						l.ClearProviders();
 						l.AddProvider(new CustomConsoleLogProvider(processor));
 					})
-					.UseStartup<Startup>()
+					.ConfigureWebHostDefaults(webBuilder => {
+						webBuilder
+							.UseKestrel()
+							.UseConfiguration(conf)
+							.UseStartup<Startup>();
+					})
 					.Build();
-				host.Run();
+				await host.StartAsync();
+				var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Configuration");
+				var urls = host.GetServerFeatures<IServerAddressesFeature>().Addresses;
+				foreach (var url in urls)
+				{
+					// Some tools such as dotnet watch parse this exact log to open the browser
+					logger.LogInformation("Now listening on: " + url);
+				}
+				await host.WaitForShutdownAsync();
 			}
 			catch (ConfigException ex)
 			{

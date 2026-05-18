@@ -12,10 +12,9 @@ using NBitcoin.RPC;
 using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
 using NBXplorer.Logging;
-using NBitcoin.Scripting;
 using NBXplorer.Backend;
-using NBitcoin.Altcoins;
 using static NBXplorer.Backend.DbConnectionHelper;
+using NBitcoin.Altcoins.Elements;
 
 namespace NBXplorer
 {
@@ -60,7 +59,7 @@ namespace NBXplorer
 		class ScannedItems
 		{
 			public Dictionary<Script, KeyPathInformation> KeyPathInformations = new Dictionary<Script, KeyPathInformation>();
-			public List<OutputDescriptor> Descriptors = new List<OutputDescriptor>();
+			public List<string> Descriptors = new List<string>();
 		}
 
 		public ScanUTXOSetService(ScanUTXOSetServiceAccessor accessor,
@@ -285,17 +284,6 @@ namespace NBXplorer
 			await repo.SaveBlocks(blockHeaders);
 			await repo.SaveMatches(query, records.ToArray());
 		}
-		private static Dictionary<Script, KeyPath> ToDictionary(IEnumerable<KeyPathInformation> knownScriptMapping)
-		{
-			if (knownScriptMapping == null)
-				return null;
-			var result = new Dictionary<Script, KeyPath>();
-			foreach (var keypathInfo in knownScriptMapping)
-			{
-				result.TryAdd(keypathInfo.ScriptPubKey, keypathInfo.KeyPath);
-			}
-			return result;
-		}
 
 		private ScannedItems GetScannedItems(ScanUTXOWorkItem workItem, ScanUTXOProgress progress, NBXplorerNetwork network)
 		{
@@ -303,12 +291,11 @@ namespace NBXplorer
 			var derivationStrategy = workItem.DerivationStrategy;
 			foreach (var feature in derivationStrategy.GetDerivationFeatures(keyPathTemplates))
 			{
-				var keyPathTemplate = keyPathTemplates.GetKeyPathTemplate(feature);
-				var lineDerivation = workItem.DerivationStrategy.DerivationStrategy.GetLineFor(keyPathTemplate);
+				var lineDerivation = workItem.DerivationStrategy.DerivationStrategy.GetLineFor(keyPathTemplates, feature);
 				Enumerable.Range(progress.From, progress.Count)
 						  .Select(index =>
 						  {
-							  var keyPath = keyPathTemplate.GetKeyPath(index, false);
+							  var keyPath = (lineDerivation as KeyPathTemplateDerivationLine)?.KeyPathTemplate.GetKeyPath(index, false);
 							  var derivation = lineDerivation.Derive((uint)index);
 							  var info = new KeyPathInformation()
 							  {
@@ -318,10 +305,17 @@ namespace NBXplorer
 								KeyPath = keyPath,
 								Redeem = derivation.Redeem,
 								TrackedSource = derivationStrategy,
-								Address = network.CreateAddress(derivationStrategy.DerivationStrategy, keyPath, derivation.ScriptPubKey),
+								Address = derivation.ScriptPubKey.GetDestinationAddress(network.NBitcoinNetwork),
 								Index = index
 							  };
-							  items.Descriptors.Add(OutputDescriptor.NewRaw(info.ScriptPubKey, network.NBitcoinNetwork));
+							  if (network.IsElement && !workItem.DerivationStrategy.DerivationStrategy.Unblinded())
+							  {
+								  var blindingPubKey = 
+								  NBXplorer.NBXplorerNetworkProvider.LiquidNBXplorerNetwork
+								  .GenerateBlindingKey(derivationStrategy.DerivationStrategy, keyPath, derivation.ScriptPubKey, network.NBitcoinNetwork).PubKey;
+								  info.Address = new BitcoinBlindedAddress(blindingPubKey, info.Address);
+							  }
+							  items.Descriptors.Add($"raw({info.ScriptPubKey.ToHex()})");
 							  items.KeyPathInformations.TryAdd(info.ScriptPubKey, info);
 							  return info;
 						  }).All(_ => true);
@@ -333,7 +327,7 @@ namespace NBXplorer
 		public Task StopAsync(CancellationToken cancellationToken)
 		{
 			_Cts.Cancel();
-			_Channel.Writer.Complete();
+			_Channel.Writer.TryComplete();
 			return _Task;
 		}
 
