@@ -1082,7 +1082,7 @@ namespace NBXplorer.Tests
 			});
 			NBXplorer.Logging.Logs.Configure(container.BuildServiceProvider().GetRequiredService<ILoggerFactory>());
 			
-			new Startup(conf,null,null).ConfigureServices(container);
+			new Startup(conf, null).ConfigureServices(container);
 			var provider = container.BuildServiceProvider();
 			foreach (var service in provider.GetServices<IHostedService>())
 				if (service is HostedServices.DatabaseSetupHostedService)

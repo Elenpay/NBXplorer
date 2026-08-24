@@ -35,10 +35,16 @@ namespace NBXplorer.Controllers
 		/// <param name="limit"></param>
 		/// <param name="closestTo"></param>
 		/// <param name="strategy"></param>
-		/// <param name="ignoreOutpoint"></param>
+		/// <param name="minimumValue">UTXOs worth this many satoshis or less are never selected.</param>
+		/// <param name="ignoreOutpoint">
+		/// Outpoints to exclude, one repeated query parameter each. Capped by the request line size;
+		/// POST them in <paramref name="body"/> instead when the list is long.
+		/// </param>
+		/// <param name="body">POST-only. Carries the ignored outpoints off the request line.</param>
 		/// <returns></returns>
 		/// <exception cref="ArgumentNullException"></exception>
 		[HttpGet]
+		[HttpPost]
 		[Route("cryptos/{cryptoCode}/derivations/{derivationScheme}/selectutxos")]
 		[Route("cryptos/{cryptoCode}/addresses/{address}/selectutxos")]
 		public async Task<IActionResult> GetUTXOsByLimit(
@@ -53,8 +59,16 @@ namespace NBXplorer.Controllers
 			[FromQuery(Name = "limit")] int limit = 0,
 			[FromQuery(Name = "closestTo")] long? closestTo = null,
 			[FromQuery(Name = "strategy")] CoinSelectionStrategy strategy = CoinSelectionStrategy.SmallestFirst,
-			[FromQuery(Name = "ignoreOutpoint")] string[] ignoreOutpoint = null)
+			[FromQuery(Name = "minimumValue")] long minimumValue = 546,
+			[FromQuery(Name = "ignoreOutpoint")] string[] ignoreOutpoint = null,
+			[FromBody] SelectUTXOsRequest body = null)
 		{
+			// The query parameters cap out at the request line size, so a caller with a long list
+			// sends it in the body instead. Accept both and merge, so either transport works.
+			var ignoredOutpoints = (ignoreOutpoint ?? Array.Empty<string>())
+				.Concat(body?.IgnoreOutpoints ?? Array.Empty<string>())
+				.ToHashSet();
+
 			var trackedSource = trackedSourceContext.TrackedSource;
 			var repo = trackedSourceContext.Repository;
 			var network = trackedSourceContext.Network;
@@ -94,8 +108,9 @@ namespace NBXplorer.Controllers
 				bool input_mempool,
 				DateTime tx_seen_at)>(
 				$"SELECT blk_height, tx_id, wu.idx, value, script, {addrColumns}, {descriptorColumns}, mempool, input_mempool, seen_at " +
-				$"FROM wallets_utxos wu{descriptorJoin} WHERE code='{network.CryptoCode}' AND wallet_id='{repo.GetWalletKey(trackedSource).wid}' AND immature IS FALSE AND value > 546 {belowAmount}" +
-				$"ORDER BY {CoinSelectionHelpers.OrderBy(strategy, closestTo ?? 0)}");
+				$"FROM wallets_utxos wu{descriptorJoin} WHERE code='{network.CryptoCode}' AND wallet_id='{repo.GetWalletKey(trackedSource).wid}' AND immature IS FALSE AND value > @minimumValue {belowAmount}" +
+				$"ORDER BY {CoinSelectionHelpers.OrderBy(strategy, closestTo ?? 0)}",
+				new { minimumValue });
 			UTXOChanges changes = new UTXOChanges()
 			{
 				CurrentHeight = (int)height,
@@ -127,7 +142,7 @@ namespace NBXplorer.Controllers
 				}
 				u.Address = utxo.address is null ? u.ScriptPubKey.GetDestinationAddress(network.NBitcoinNetwork) : BitcoinAddress.Create(utxo.address, network.NBitcoinNetwork);
 
-				if (ignoreOutpoint != null && ignoreOutpoint.Contains(u.Outpoint.ToString())) continue;
+				if (ignoredOutpoints.Contains(u.Outpoint.ToString())) continue;
 
 				// Inverted clauses for clarity
 				if (utxo.mempool)
