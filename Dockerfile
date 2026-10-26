@@ -16,7 +16,7 @@ COPY . .
 RUN cd NBXplorer && \
     dotnet publish --output /app/ --configuration Release
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.6-noble
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.14-noble
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
